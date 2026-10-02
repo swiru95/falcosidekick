@@ -5,6 +5,7 @@ package outputs
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -29,7 +30,17 @@ func newWebUIPayload(falcopayload types.FalcoPayload) WebUIPayload {
 	}
 }
 
-// WebUIPost posts event to Slack
+// webUIError records an error and updates metrics (de-duplicates error handling)
+func (c *Client) webUIError(err error, logErr string) {
+	go c.CountMetric(Outputs, 1, []string{OutputWebUI, "status:error"})
+	c.Stats.WebUI.Add(Error, 1)
+	c.PromStats.Outputs.With(map[string]string{"destination": "webui", "status": Error}).Inc()
+	c.OTLPMetrics.Outputs.With(attribute.String("destination", "webui"),
+		attribute.String("status", Error)).Inc()
+	utils.Log(utils.ErrorLvl, c.OutputType, logErr)
+}
+
+// WebUIPost posts event to WebUI
 func (c *Client) WebUIPost(falcopayload types.FalcoPayload) {
 	c.Stats.WebUI.Add(Total, 1)
 
@@ -40,12 +51,25 @@ func (c *Client) WebUIPost(falcopayload types.FalcoPayload) {
 		ctx := context.Background()
 		token, err := c.WebUITokenSource.Token(ctx)
 		if err != nil {
-			go c.CountMetric(Outputs, 1, []string{OutputWebUI, "status:error"})
-			c.Stats.WebUI.Add(Error, 1)
-			c.PromStats.Outputs.With(map[string]string{"destination": "webui", "status": Error}).Inc()
-			c.OTLPMetrics.Outputs.With(attribute.String("destination", "webui"),
-				attribute.String("status", Error)).Inc()
-			utils.Log(utils.ErrorLvl, c.OutputType, "failed to get token: "+err.Error())
+			// Rate-limit error log to once per 10 seconds
+			c.webUITokenErrorMu.Lock()
+			now := time.Now()
+			shouldLog := now.Sub(c.webUITokenErrorLastLog) > 10*time.Second
+			if shouldLog {
+				c.webUITokenErrorLastLog = now
+			}
+			c.webUITokenErrorMu.Unlock()
+
+			if shouldLog {
+				c.webUIError(err, "failed to get token: "+err.Error())
+			} else {
+				// Still count metrics even if not logging
+				go c.CountMetric(Outputs, 1, []string{OutputWebUI, "status:error"})
+				c.Stats.WebUI.Add(Error, 1)
+				c.PromStats.Outputs.With(map[string]string{"destination": "webui", "status": Error}).Inc()
+				c.OTLPMetrics.Outputs.With(attribute.String("destination", "webui"),
+					attribute.String("status", Error)).Inc()
+			}
 			return
 		}
 		opts = append(opts, func(req *http.Request) {
@@ -55,12 +79,7 @@ func (c *Client) WebUIPost(falcopayload types.FalcoPayload) {
 
 	err := c.Post(newWebUIPayload(falcopayload), opts...)
 	if err != nil {
-		go c.CountMetric(Outputs, 1, []string{OutputWebUI, "status:error"})
-		c.Stats.WebUI.Add(Error, 1)
-		c.PromStats.Outputs.With(map[string]string{"destination": "webui", "status": Error}).Inc()
-		c.OTLPMetrics.Outputs.With(attribute.String("destination", "webui"),
-			attribute.String("status", Error)).Inc()
-		utils.Log(utils.ErrorLvl, c.OutputType, err.Error())
+		c.webUIError(err, err.Error())
 		return
 	}
 

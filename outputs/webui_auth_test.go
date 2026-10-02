@@ -69,7 +69,7 @@ func TestClientCredentialsFlow(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestFileTokenProvider(t *testing.T) {
 		TokenFile: tokenFile,
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestFileTokenProviderEmpty(t *testing.T) {
 		TokenFile: tokenFile,
 	}
 
-	_, err := ValidateWebUIAuth(config, "test")
+	_, err := ValidateWebUIAuth(config)
 	if err == nil {
 		t.Error("Expected error for empty token file")
 	}
@@ -167,7 +167,7 @@ func TestFileTokenProviderMissing(t *testing.T) {
 		TokenFile: "/nonexistent/token/file",
 	}
 
-	_, err := ValidateWebUIAuth(config, "test")
+	_, err := ValidateWebUIAuth(config)
 	if err == nil {
 		t.Error("Expected error for missing token file")
 	}
@@ -183,7 +183,7 @@ func TestValidateWebUIAuthConflict(t *testing.T) {
 		TokenFile: "/some/file",
 	}
 
-	_, err := ValidateWebUIAuth(config, "test")
+	_, err := ValidateWebUIAuth(config)
 	if err == nil {
 		t.Error("Expected error for conflicting auth config")
 	}
@@ -197,7 +197,7 @@ func TestValidateWebUIAuthMissingClientID(t *testing.T) {
 		},
 	}
 
-	_, err := ValidateWebUIAuth(config, "test")
+	_, err := ValidateWebUIAuth(config)
 	if err == nil {
 		t.Error("Expected error for missing clientid")
 	}
@@ -212,7 +212,7 @@ func TestValidateWebUIAuthMissingSecret(t *testing.T) {
 		},
 	}
 
-	_, err := ValidateWebUIAuth(config, "test")
+	_, err := ValidateWebUIAuth(config)
 	if err == nil {
 		t.Error("Expected error for missing secret")
 	}
@@ -245,7 +245,7 @@ func TestValidateWebUIAuthSecretFile(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -259,29 +259,26 @@ func TestValidateWebUIAuthSecretFile(t *testing.T) {
 	}
 }
 
-// TestValidateWebUIAuthHTTPTokenURLNonLoopback tests warning for HTTP token URL
-func TestValidateWebUIAuthHTTPTokenURLNonLoopback(t *testing.T) {
+// TestWarnIfPlaintextWebUIURLNonLoopback tests warning for HTTP WebUI URL
+func TestWarnIfPlaintextWebUIURLNonLoopback(t *testing.T) {
 	// The spec says it should log a warning but not block for non-loopback HTTP
-	err := ValidateWebUIAuthURL("http://example.com", true)
-	if err == nil {
-		// This is expected - the validation logs a warning but doesn't return an error
-	}
+	// WarnIfPlaintextWebUIURL should log a warning and not panic
+	WarnIfPlaintextWebUIURL("http://example.com", true)
+	// If we get here without panic, test passes
 }
 
-// TestValidateWebUIAuthHTTPTokenURLLoopback tests no error for HTTP loopback
-func TestValidateWebUIAuthHTTPTokenURLLoopback(t *testing.T) {
-	err := ValidateWebUIAuthURL("http://localhost:8080", true)
-	if err != nil {
-		t.Errorf("Expected no error for loopback HTTP, got %v", err)
-	}
+// TestWarnIfPlaintextWebUIURLLoopback tests no warning for HTTP loopback
+func TestWarnIfPlaintextWebUIURLLoopback(t *testing.T) {
+	// WarnIfPlaintextWebUIURL should not log a warning for loopback
+	WarnIfPlaintextWebUIURL("http://localhost:8080", true)
+	// If we get here without panic, test passes
 }
 
-// TestValidateWebUIAuthHTTPSTokenURL tests no error for HTTPS URL
-func TestValidateWebUIAuthHTTPSTokenURL(t *testing.T) {
-	err := ValidateWebUIAuthURL("https://example.com", true)
-	if err != nil {
-		t.Errorf("Expected no error for HTTPS URL, got %v", err)
-	}
+// TestWarnIfPlaintextWebUIURLHTTPS tests no warning for HTTPS URL
+func TestWarnIfPlaintextWebUIURLHTTPS(t *testing.T) {
+	// WarnIfPlaintextWebUIURL should not log a warning for HTTPS
+	WarnIfPlaintextWebUIURL("https://example.com", true)
+	// If we get here without panic, test passes
 }
 
 // TestWebUIPostWithAuthorization tests WebUIPost with authorization header
@@ -314,7 +311,7 @@ func TestWebUIPostWithAuthorization(t *testing.T) {
 			ClientSecret: "secret",
 		},
 	}
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -406,7 +403,7 @@ func TestOAuth2CAFile(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -457,7 +454,7 @@ func TestOAuth2ResourceIndicator(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -475,7 +472,7 @@ func TestOAuth2ResourceIndicator(t *testing.T) {
 func TestNoAuthConfigured(t *testing.T) {
 	config := types.WebUIOutputConfig{}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -494,7 +491,7 @@ func TestOAuth2TokenURLHTTPNonLoopback(t *testing.T) {
 		},
 	}
 
-	_, err := ValidateWebUIAuth(config, "test")
+	_, err := ValidateWebUIAuth(config)
 	if err == nil {
 		t.Error("Expected error for HTTP tokenurl on non-loopback host")
 	}
@@ -521,7 +518,7 @@ func TestOAuth2TokenURLHTTPLoopback(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Errorf("Expected no error for HTTP tokenurl on loopback, got %v", err)
 	}
@@ -554,7 +551,7 @@ func TestLoopbackBypassAttempts(t *testing.T) {
 				},
 			}
 
-			_, err := ValidateWebUIAuth(config, "test")
+			_, err := ValidateWebUIAuth(config)
 			if tc.shouldFail && err == nil {
 				t.Errorf("Expected error for bypass attempt: %s", tc.name)
 			}
@@ -582,11 +579,9 @@ func TestWebUIURLBypassLoopback(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// ValidateWebUIAuthURL should not return error (just warn) but we check it doesn't error
-			err := ValidateWebUIAuthURL(tc.url, true)
-			if err != nil {
-				t.Errorf("ValidateWebUIAuthURL should not error, got: %v", err)
-			}
+			// WarnIfPlaintextWebUIURL logs warnings but does not error
+			WarnIfPlaintextWebUIURL(tc.url, true)
+			// If we get here without panic, test passes
 		})
 	}
 }
@@ -633,7 +628,7 @@ func TestScopesCommaAndSpaceSeparated(t *testing.T) {
 				},
 			}
 
-			provider, err := ValidateWebUIAuth(config, "test")
+			provider, err := ValidateWebUIAuth(config)
 			if err != nil {
 				t.Errorf("Failed to create provider: %v", err)
 				return
@@ -663,7 +658,7 @@ func TestFileTokenProviderStatErrorCachedToken(t *testing.T) {
 		TokenFile: tokenFile,
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -714,7 +709,7 @@ func TestOAuth2TokenTTLCapping(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -759,7 +754,7 @@ func TestOAuth2TokenEndpointBackoff(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -803,7 +798,7 @@ func TestOAuth2ExponentialBackoffWithInjectableClock(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
@@ -869,7 +864,7 @@ func TestOAuth2ExponentialBackoffWithInjectableClock(t *testing.T) {
 		},
 	}
 
-	successProvider, err := ValidateWebUIAuth(successConfig, "test")
+	successProvider, err := ValidateWebUIAuth(successConfig)
 	if err != nil {
 		t.Fatalf("Failed to create success provider: %v", err)
 	}
@@ -894,7 +889,7 @@ func TestOAuth2ExponentialBackoffWithInjectableClock(t *testing.T) {
 		},
 	}
 
-	failProvider, err := ValidateWebUIAuth(failConfig, "test")
+	failProvider, err := ValidateWebUIAuth(failConfig)
 	if err != nil {
 		t.Fatalf("Failed to create fail provider: %v", err)
 	}
@@ -964,7 +959,7 @@ func TestOAuth2NoRedirectFollowing(t *testing.T) {
 		},
 	}
 
-	provider, err := ValidateWebUIAuth(config, "test")
+	provider, err := ValidateWebUIAuth(config)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)
 	}

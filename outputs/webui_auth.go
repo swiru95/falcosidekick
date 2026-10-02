@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/falcosecurity/falcosidekick/internal/pkg/utils"
 	"github.com/falcosecurity/falcosidekick/types"
@@ -54,10 +55,9 @@ func isLoopbackHost(host string) bool {
 // tokenTTLCapper wraps a TokenSource and caps token TTL if Expiry is zero (no expires_in)
 type tokenTTLCapper struct {
 	source oauth2.TokenSource
-	mu     sync.Mutex
 }
 
-// Token returns the token, capping TTL to MaxTokenTTL if Expiry is zero
+// Token returns a copy of the token, capping TTL to MaxTokenTTL if Expiry is zero
 func (t *tokenTTLCapper) Token() (*oauth2.Token, error) {
 	token, err := t.source.Token()
 	if err != nil {
@@ -65,10 +65,11 @@ func (t *tokenTTLCapper) Token() (*oauth2.Token, error) {
 	}
 
 	// If token has no expiry (expires_in was missing), cap it to MaxTokenTTL
+	// Return a COPY of the token to avoid race conditions with concurrent Valid() calls
 	if token.Expiry.IsZero() {
-		t.mu.Lock()
-		token.Expiry = time.Now().Add(MaxTokenTTL)
-		t.mu.Unlock()
+		t2 := *token
+		t2.Expiry = time.Now().Add(MaxTokenTTL)
+		return &t2, nil
 	}
 
 	return token, nil
@@ -76,29 +77,29 @@ func (t *tokenTTLCapper) Token() (*oauth2.Token, error) {
 
 // clientCredentialsProvider handles OAuth2 client credentials flow with backoff and TTL capping
 type clientCredentialsProvider struct {
-	config          *clientcredentials.Config
 	source          oauth2.TokenSource
 	mu              sync.Mutex
 	lastErr         error
 	lastErrTime     time.Time
 	backoffDuration time.Duration
 	backoffAttempts int
+	fetching        bool // prevent thundering herd
+	group           singleflight.Group
 	now             func() time.Time // injectable clock for testing
 }
 
 // fileTokenProvider handles reading tokens from a file with cached fallback on errors
 type fileTokenProvider struct {
-	filePath      string
-	mu            sync.RWMutex
-	token         string
-	mtime         time.Time
-	lastStat      time.Time
-	lastErrWarn   time.Time
-	tokenReadOnce bool // tracks if token was ever successfully read
+	filePath    string
+	mu          sync.RWMutex
+	token       string
+	mtime       time.Time
+	lastStat    time.Time
+	lastErrWarn time.Time
 }
 
 // newClientCredentialsProvider creates a new OAuth2 client credentials provider
-func newClientCredentialsProvider(cfg types.WebUIOAuth2Config, outputType string) (*clientCredentialsProvider, error) {
+func newClientCredentialsProvider(cfg types.WebUIOAuth2Config) (*clientCredentialsProvider, error) {
 	// Validate required fields
 	if cfg.TokenURL == "" {
 		return nil, errors.New("oauth2: tokenurl is required")
@@ -199,11 +200,14 @@ func newClientCredentialsProvider(cfg types.WebUIOAuth2Config, outputType string
 	baseSource := oauth2Config.TokenSource(context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient))
 
 	// Wrap with TTL capper to enforce max 5-minute TTL if expires_in is missing
+	// CRITICAL: wrap the capper BEFORE oauth2.ReuseTokenSource to avoid race conditions
 	cappedSource := &tokenTTLCapper{source: baseSource}
 
+	// Wrap with ReuseTokenSource for token caching
+	reuseSource := oauth2.ReuseTokenSource(nil, cappedSource)
+
 	return &clientCredentialsProvider{
-		config:          oauth2Config,
-		source:          cappedSource,
+		source:          reuseSource,
 		backoffDuration: BackoffMinDuration,
 		now:             time.Now,
 	}, nil
@@ -220,40 +224,65 @@ func (p *clientCredentialsProvider) Token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("oauth2: in backoff period, failed to get token: %w", p.lastErr)
 	}
 
-	// If we were in backoff and it expired, clear error to try again
-	// but DON'T reset attempts - keep them for exponential backoff
+	// If we were in backoff and it expired, but another goroutine is already fetching,
+	// return error immediately (keep lastErr set until fetch completes)
+	if p.lastErr != nil && p.fetching {
+		defer p.mu.Unlock()
+		return "", fmt.Errorf("oauth2: fetch in progress, failed to get token: %w", p.lastErr)
+	}
+
+	// Backoff window expired and no fetch in progress - mark as fetching
 	if p.lastErr != nil {
-		p.lastErr = nil
+		p.fetching = true
 	}
 
 	p.mu.Unlock()
 
-	token, err := p.source.Token()
+	// Use singleflight to ensure only one goroutine fetches at a time
+	tokenInterface, err, _ := p.group.Do("fetch", func() (interface{}, error) {
+		token, err := p.source.Token()
+		if err != nil {
+			return nil, err
+		}
+		return token.AccessToken, nil
+	})
+
+	tokenStr, ok := tokenInterface.(string)
+	if !ok && tokenInterface != nil {
+		tokenStr = ""
+	}
+
+	p.mu.Lock()
 	if err != nil {
-		p.mu.Lock()
 		// Record error and set backoff
 		p.lastErr = err
 		p.lastErrTime = p.now()
 		p.backoffAttempts++
 
-		// Exponential backoff: 1s * 2^(attempts-1), capped at 60s
-		p.backoffDuration = BackoffMinDuration * time.Duration(1<<uint(p.backoffAttempts-1))
+		// Exponential backoff: 1s * 2^(min(attempts-1, 6)), capped at 60s
+		// Capping the shift at 6 ensures we don't overflow: 2^6 = 64, then capped to 60
+		shift := p.backoffAttempts - 1
+		if shift > 6 {
+			shift = 6
+		}
+		p.backoffDuration = BackoffMinDuration * time.Duration(1<<uint(shift))
 		if p.backoffDuration > BackoffMaxDuration {
 			p.backoffDuration = BackoffMaxDuration
 		}
+		p.fetching = false
 		p.mu.Unlock()
 
 		return "", fmt.Errorf("oauth2: failed to get token (backoff %v): %w", p.backoffDuration, err)
 	}
 
 	// Success, reset backoff and attempts
-	p.mu.Lock()
 	p.lastErr = nil
 	p.backoffAttempts = 0
 	p.backoffDuration = BackoffMinDuration
+	p.fetching = false
 	p.mu.Unlock()
 
-	return token.AccessToken, nil
+	return tokenStr, nil
 }
 
 // newFileTokenProvider creates a new file-based token provider
@@ -264,7 +293,6 @@ func newFileTokenProvider(filePath string) (*fileTokenProvider, error) {
 
 	provider := &fileTokenProvider{
 		filePath: filePath,
-		lastStat: time.Now(),
 	}
 
 	// Read initial token
@@ -283,7 +311,6 @@ func (p *fileTokenProvider) refresh() error {
 	lastStat := p.lastStat
 	oldMTime := p.mtime
 	hasToken := p.token != ""
-	tokenReadOnce := p.tokenReadOnce
 	lastErrWarn := p.lastErrWarn
 	p.mu.RUnlock()
 
@@ -344,30 +371,26 @@ func (p *fileTokenProvider) refresh() error {
 	token := strings.TrimSpace(string(data))
 	if token == "" {
 		// Only error if we never successfully read a token before
-		if !tokenReadOnce {
+		if !hasToken {
 			return errors.New("tokenfile: file is empty")
 		}
 		// If we have cached token but new read is empty, keep serving cache
-		if hasToken {
-			if now.Sub(lastErrWarn) > 1*time.Minute {
-				utils.Log(utils.WarningLvl, "WebUI", "tokenfile: file is now empty (serving cached token)")
-				p.mu.Lock()
-				p.lastErrWarn = now
-				p.mu.Unlock()
-			}
+		if now.Sub(lastErrWarn) > 1*time.Minute {
+			utils.Log(utils.WarningLvl, "WebUI", "tokenfile: file is now empty (serving cached token)")
 			p.mu.Lock()
-			p.lastStat = now
+			p.lastErrWarn = now
 			p.mu.Unlock()
-			return nil
 		}
-		return errors.New("tokenfile: file is empty")
+		p.mu.Lock()
+		p.lastStat = now
+		p.mu.Unlock()
+		return nil
 	}
 
 	p.mu.Lock()
 	p.token = token
 	p.mtime = newMTime
 	p.lastStat = now
-	p.tokenReadOnce = true
 	p.mu.Unlock()
 
 	return nil
@@ -396,7 +419,7 @@ func (p *fileTokenProvider) Token(ctx context.Context) (string, error) {
 }
 
 // ValidateWebUIAuth validates OAuth2 and TokenFile configuration
-func ValidateWebUIAuth(config types.WebUIOutputConfig, outputType string) (tokenProvider, error) {
+func ValidateWebUIAuth(config types.WebUIOutputConfig) (tokenProvider, error) {
 	hasOAuth2 := config.OAuth2.TokenURL != ""
 	hasTokenFile := config.TokenFile != ""
 
@@ -412,7 +435,7 @@ func ValidateWebUIAuth(config types.WebUIOutputConfig, outputType string) (token
 
 	// Configure OAuth2
 	if hasOAuth2 {
-		provider, err := newClientCredentialsProvider(config.OAuth2, outputType)
+		provider, err := newClientCredentialsProvider(config.OAuth2)
 		if err != nil {
 			return nil, fmt.Errorf("webui: %w", err)
 		}
@@ -420,32 +443,32 @@ func ValidateWebUIAuth(config types.WebUIOutputConfig, outputType string) (token
 	}
 
 	// Configure token file
-	if hasTokenFile {
-		provider, err := newFileTokenProvider(config.TokenFile)
-		if err != nil {
-			return nil, fmt.Errorf("webui: %w", err)
-		}
-		return provider, nil
+	provider, err := newFileTokenProvider(config.TokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("webui: %w", err)
 	}
-
-	return nil, nil
+	return provider, nil
 }
 
-// ValidateWebUIAuthURL validates that if a token source is configured, the UI URL uses TLS (unless loopback)
-func ValidateWebUIAuthURL(uiURL string, hasAuth bool) error {
+// WarnIfPlaintextWebUIURL warns if a token source is configured but the UI URL uses plaintext HTTP (unless loopback)
+func WarnIfPlaintextWebUIURL(rawURL string, hasAuth bool) {
 	if !hasAuth {
-		return nil
+		return
 	}
 
-	if !strings.HasPrefix(uiURL, "https://") {
-		// Parse URL to extract hostname securely
-		parsedURL, err := url.Parse(uiURL)
-		if err == nil && isLoopbackHost(parsedURL.Hostname()) {
-			return nil
-		}
-		// Log warning for plaintext HTTP (but don't block, for service mesh deployments)
-		utils.Log(utils.WarningLvl, "WebUI", "bearer token sent over plaintext HTTP; use TLS or a service mesh")
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return
 	}
 
-	return nil
+	// Check if URL uses HTTPS or is a loopback address
+	if strings.EqualFold(parsedURL.Scheme, "https") {
+		return
+	}
+	if isLoopbackHost(parsedURL.Hostname()) {
+		return
+	}
+
+	// Log warning for plaintext HTTP (but don't block, for service mesh deployments)
+	utils.Log(utils.WarningLvl, "WebUI", "bearer token sent over plaintext HTTP; use TLS or a service mesh")
 }
