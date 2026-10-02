@@ -55,8 +55,8 @@ jobs:
         id: meta
         run: |
           COMMIT_SHA=${{ github.sha }}
-          echo "tags=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${COMMIT_SHA:0:12},${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
-          echo "labels=org.opencontainers.image.revision=${COMMIT_SHA:0:12}" >> $GITHUB_OUTPUT
+          echo "tags=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${COMMIT_SHA},${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_OUTPUT
+          echo "labels=org.opencontainers.image.revision=${COMMIT_SHA}" >> $GITHUB_OUTPUT
 
       - uses: docker/build-push-action@v6
         with:
