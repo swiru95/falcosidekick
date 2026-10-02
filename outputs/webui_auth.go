@@ -83,6 +83,7 @@ type clientCredentialsProvider struct {
 	lastErrTime     time.Time
 	backoffDuration time.Duration
 	backoffAttempts int
+	now             func() time.Time // injectable clock for testing
 }
 
 // fileTokenProvider handles reading tokens from a file with cached fallback on errors
@@ -172,6 +173,9 @@ func newClientCredentialsProvider(cfg types.WebUIOAuth2Config, outputType string
 	tokenHTTPClient := &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	// Build OAuth2 config
@@ -201,6 +205,7 @@ func newClientCredentialsProvider(cfg types.WebUIOAuth2Config, outputType string
 		config:          oauth2Config,
 		source:          cappedSource,
 		backoffDuration: BackoffMinDuration,
+		now:             time.Now,
 	}, nil
 }
 
@@ -209,16 +214,16 @@ func (p *clientCredentialsProvider) Token(ctx context.Context) (string, error) {
 	p.mu.Lock()
 
 	// Check if we're in backoff period
-	if p.lastErr != nil && time.Since(p.lastErrTime) < p.backoffDuration {
+	if p.lastErr != nil && p.now().Sub(p.lastErrTime) < p.backoffDuration {
 		defer p.mu.Unlock()
 		// Still in backoff, return the cached error
 		return "", fmt.Errorf("oauth2: in backoff period, failed to get token: %w", p.lastErr)
 	}
 
-	// If we were in backoff and it expired, try again
+	// If we were in backoff and it expired, clear error to try again
+	// but DON'T reset attempts - keep them for exponential backoff
 	if p.lastErr != nil {
 		p.lastErr = nil
-		p.backoffAttempts = 0
 	}
 
 	p.mu.Unlock()
@@ -228,10 +233,10 @@ func (p *clientCredentialsProvider) Token(ctx context.Context) (string, error) {
 		p.mu.Lock()
 		// Record error and set backoff
 		p.lastErr = err
-		p.lastErrTime = time.Now()
+		p.lastErrTime = p.now()
 		p.backoffAttempts++
 
-		// Exponential backoff: 1s * 2^attempts, capped at 60s
+		// Exponential backoff: 1s * 2^(attempts-1), capped at 60s
 		p.backoffDuration = BackoffMinDuration * time.Duration(1<<uint(p.backoffAttempts-1))
 		if p.backoffDuration > BackoffMaxDuration {
 			p.backoffDuration = BackoffMaxDuration
@@ -241,7 +246,7 @@ func (p *clientCredentialsProvider) Token(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("oauth2: failed to get token (backoff %v): %w", p.backoffDuration, err)
 	}
 
-	// Success, reset backoff
+	// Success, reset backoff and attempts
 	p.mu.Lock()
 	p.lastErr = nil
 	p.backoffAttempts = 0

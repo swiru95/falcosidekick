@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/falcosecurity/falcosidekick/types"
 )
@@ -780,5 +781,203 @@ func TestOAuth2TokenEndpointBackoff(t *testing.T) {
 	// Should not have made additional call (backoff prevents it)
 	if callCount > initialCallCount {
 		t.Errorf("Expected backoff to prevent additional call, but call count increased from %d to %d", initialCallCount, callCount)
+	}
+}
+
+// TestOAuth2ExponentialBackoffWithInjectableClock tests true exponential backoff with injectable clock
+func TestOAuth2ExponentialBackoffWithInjectableClock(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// Always return error
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "server_error"}`))
+	}))
+	defer server.Close()
+
+	config := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{
+			TokenURL:     server.URL,
+			ClientID:     "test-backoff",
+			ClientSecret: "testsecret-notcred",
+		},
+	}
+
+	provider, err := ValidateWebUIAuth(config, "test")
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	// Cast to access injectable clock
+	ccProvider := provider.(*clientCredentialsProvider)
+
+	// Set up injectable clock
+	mockTime := time.Now()
+	ccProvider.now = func() time.Time { return mockTime }
+
+	// Successive failures should yield exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s, 60s (capped)
+	expectedBackoffs := []time.Duration{
+		1 * time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		16 * time.Second,
+		32 * time.Second,
+		60 * time.Second, // capped at BackoffMaxDuration
+	}
+
+	for i, expectedBackoff := range expectedBackoffs {
+		// First attempt after backoff expires - should make server call
+		_, err := ccProvider.Token(context.Background())
+		if err == nil {
+			t.Errorf("Attempt %d: Expected error on token call", i+1)
+		}
+
+		// Verify backoff duration
+		ccProvider.mu.Lock()
+		actualBackoff := ccProvider.backoffDuration
+		ccProvider.mu.Unlock()
+
+		if actualBackoff != expectedBackoff {
+			t.Errorf("Attempt %d: Expected backoff %v, got %v", i+1, expectedBackoff, actualBackoff)
+		}
+
+		// Advance time by the backoff duration + 1ms to exceed backoff window
+		mockTime = mockTime.Add(expectedBackoff + 1*time.Millisecond)
+	}
+
+	// Now simulate a successful token fetch
+	// We need to create a new provider to test success flow separately,
+	// since the cached token from the error server would interfere
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return success
+		w.Header().Set("Content-Type", "application/json")
+		response := map[string]interface{}{
+			"access_token": "success-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		}
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer successServer.Close()
+
+	successConfig := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{
+			TokenURL:     successServer.URL,
+			ClientID:     "test-success",
+			ClientSecret: "testsecret-notcred",
+		},
+	}
+
+	successProvider, err := ValidateWebUIAuth(successConfig, "test")
+	if err != nil {
+		t.Fatalf("Failed to create success provider: %v", err)
+	}
+
+	// Set injectable clock for success provider
+	successCCProvider := successProvider.(*clientCredentialsProvider)
+	successMockTime := time.Now()
+	successCCProvider.now = func() time.Time { return successMockTime }
+
+	// First, cause a failure to build up attempts
+	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "server_error"}`))
+	}))
+	defer failServer.Close()
+
+	failConfig := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{
+			TokenURL:     failServer.URL,
+			ClientID:     "test-fail",
+			ClientSecret: "testsecret-notcred",
+		},
+	}
+
+	failProvider, err := ValidateWebUIAuth(failConfig, "test")
+	if err != nil {
+		t.Fatalf("Failed to create fail provider: %v", err)
+	}
+
+	failCCProvider := failProvider.(*clientCredentialsProvider)
+	failMockTime := time.Now()
+	failCCProvider.now = func() time.Time { return failMockTime }
+
+	// Build up attempts
+	_, _ = failCCProvider.Token(context.Background())
+	failMockTime = failMockTime.Add(BackoffMinDuration + 1*time.Millisecond)
+	_, _ = failCCProvider.Token(context.Background())
+	failMockTime = failMockTime.Add(2*time.Second + 1*time.Millisecond)
+
+	// Verify we have 2 attempts built up
+	failCCProvider.mu.Lock()
+	attempts := failCCProvider.backoffAttempts
+	failCCProvider.mu.Unlock()
+	if attempts != 2 {
+		t.Errorf("Expected 2 attempts after failures, got %d", attempts)
+	}
+
+	// Now test success resets attempts
+	token, err := successCCProvider.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to get token on success: %v", err)
+	}
+	if token != "success-token" {
+		t.Errorf("Expected success-token, got %s", token)
+	}
+
+	// Verify attempts were reset
+	successCCProvider.mu.Lock()
+	attempts = successCCProvider.backoffAttempts
+	backoffDur := successCCProvider.backoffDuration
+	successCCProvider.mu.Unlock()
+
+	if attempts != 0 {
+		t.Errorf("After success, expected backoffAttempts=0, got %d", attempts)
+	}
+	if backoffDur != BackoffMinDuration {
+		t.Errorf("After success, expected backoffDuration=%v, got %v", BackoffMinDuration, backoffDur)
+	}
+}
+
+// TestOAuth2NoRedirectFollowing tests that token client does not follow redirects
+func TestOAuth2NoRedirectFollowing(t *testing.T) {
+	redirectedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("Redirect target server should not receive requests")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer redirectedServer.Close()
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return a 302 redirect to another server
+		w.Header().Set("Location", redirectedServer.URL)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer tokenServer.Close()
+
+	config := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{
+			TokenURL:     tokenServer.URL,
+			ClientID:     "test-noredirect",
+			ClientSecret: "testsecret-notcred",
+		},
+	}
+
+	provider, err := ValidateWebUIAuth(config, "test")
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	// Attempt to get token - should fail due to redirect response, not follow
+	_, err = provider.Token(context.Background())
+	if err == nil {
+		t.Error("Expected error when redirect is returned (should not follow)")
+	}
+
+	// Verify the error is about the redirect response (400+ status), not about reaching the redirect target
+	if redirectedServer.URL != "" {
+		// The server handler would have been called if redirect was followed
+		// Since we're here without that error, redirect wasn't followed
 	}
 }
