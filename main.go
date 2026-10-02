@@ -587,7 +587,30 @@ func init() {
 		if err != nil {
 			config.WebUI.URL = ""
 		} else {
-			outputs.EnabledOutputs = append(outputs.EnabledOutputs, "WebUI")
+			// Validate and initialize authentication
+			hasAuth := config.WebUI.OAuth2.TokenURL != "" || config.WebUI.TokenFile != ""
+			authFailed := false
+			if hasAuth {
+				if err := outputs.ValidateWebUIAuthURL(config.WebUI.URL, hasAuth); err != nil {
+					utils.Log(utils.ErrorLvl, "WebUI", err.Error())
+					authFailed = true
+				} else {
+					tokenProvider, err := outputs.ValidateWebUIAuth(config.WebUI, "WebUI")
+					if err != nil {
+						utils.Log(utils.ErrorLvl, "WebUI", err.Error())
+						authFailed = true
+					} else if tokenProvider != nil {
+						webUIClient.WebUITokenSource = tokenProvider
+						// Mask sensitive fields
+						config.WebUI.OAuth2.ClientSecret = ""
+					}
+				}
+			}
+			if !authFailed {
+				outputs.EnabledOutputs = append(outputs.EnabledOutputs, "WebUI")
+			} else {
+				config.WebUI.URL = ""
+			}
 		}
 	}
 

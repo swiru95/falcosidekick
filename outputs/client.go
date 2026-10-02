@@ -132,6 +132,7 @@ type Client struct {
 	RedisClient       *redis.Client
 	OTLPLogsLogger    *slog.Logger
 	LogstashClient    *logstash.Stash
+	WebUITokenSource  tokenProvider
 
 	// Enable gzip compression
 	EnableCompression bool
