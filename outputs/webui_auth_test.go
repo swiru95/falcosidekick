@@ -10,8 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/oauth2"
 
 	"github.com/falcosecurity/falcosidekick/types"
 )
@@ -19,6 +23,8 @@ import (
 const (
 	testAudience = "test-audience"
 	testToken    = "test-token"
+
+	testTokenNoExpiry = "token-no-expiry" //nolint:gosec // test fixture, not a real credential
 )
 
 // TestClientCredentialsFlow tests OAuth2 client credentials grant flow
@@ -693,7 +699,7 @@ func TestOAuth2TokenTTLCapping(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		// Return token response WITHOUT expires_in (should be capped to 5 minutes)
 		response := map[string]interface{}{ //nolint:gosec // test fixture, not a real credential
-			"access_token": "token-no-expiry",
+			"access_token": testTokenNoExpiry,
 			"token_type":   "Bearer",
 			// Intentionally omit expires_in
 		}
@@ -720,7 +726,7 @@ func TestOAuth2TokenTTLCapping(t *testing.T) {
 		t.Fatalf("Failed to get token without expires_in: %v", err)
 	}
 	//nolint:gosec // test fixture, not a real credential
-	if token != "token-no-expiry" {
+	if token != testTokenNoExpiry {
 		t.Errorf("Expected token-no-expiry, got %s", token)
 	}
 
@@ -730,7 +736,7 @@ func TestOAuth2TokenTTLCapping(t *testing.T) {
 		t.Fatalf("Failed to get cached token: %v", err)
 	}
 	//nolint:gosec // test fixture, not a real credential
-	if token2 != "token-no-expiry" {
+	if token2 != testTokenNoExpiry {
 		t.Errorf("Expected reused token, got %s", token2)
 	}
 }
@@ -974,5 +980,337 @@ func TestOAuth2NoRedirectFollowing(t *testing.T) {
 	if redirectedServer.URL != "" {
 		// The server handler would have been called if redirect was followed
 		// Since we're here without that error, redirect wasn't followed
+	}
+}
+
+// newTestCCProvider builds a client credentials provider against the given token URL
+// with a controllable clock and returns the provider plus a function to move the clock.
+func newTestCCProvider(t *testing.T, tokenURL string) (*clientCredentialsProvider, func(time.Duration)) {
+	t.Helper()
+	provider, err := ValidateWebUIAuth(types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{
+			TokenURL:     tokenURL,
+			ClientID:     "test-client",
+			ClientSecret: "testsecret-notcred",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+	cc, ok := provider.(*clientCredentialsProvider)
+	if !ok {
+		t.Fatalf("Expected *clientCredentialsProvider, got %T", provider)
+	}
+	var clockMu sync.RWMutex
+	mockTime := time.Now()
+	cc.now = func() time.Time {
+		clockMu.RLock()
+		defer clockMu.RUnlock()
+		return mockTime
+	}
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		mockTime = mockTime.Add(d)
+	}
+	return cc, advance
+}
+
+// staticTokenSource always returns the very same *oauth2.Token pointer
+type staticTokenSource struct {
+	token *oauth2.Token
+}
+
+func (s *staticTokenSource) Token() (*oauth2.Token, error) { return s.token, nil }
+
+// TestTokenTTLCapperDoesNotMutateSourceToken verifies the capper returns a copy and
+// never writes to the token owned by the wrapped source (data race regression).
+func TestTokenTTLCapperDoesNotMutateSourceToken(t *testing.T) {
+	shared := &oauth2.Token{AccessToken: "shared-token", TokenType: "Bearer"}
+	capper := &tokenTTLCapper{source: &staticTokenSource{token: shared}}
+
+	const goroutines = 50
+	for round := 0; round < 5; round++ {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < goroutines; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				tok, err := capper.Token()
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				if tok == shared {
+					t.Error("capper returned the source token pointer instead of a copy")
+					return
+				}
+				if tok.Expiry.IsZero() || !tok.Valid() {
+					t.Errorf("expected capped, valid token, got expiry %v", tok.Expiry)
+				}
+				// Concurrent read of the shared token, races with any mutation of it
+				_ = shared.Valid()
+				_ = shared.Expiry
+			}()
+		}
+		close(start)
+		wg.Wait()
+	}
+	if !shared.Expiry.IsZero() {
+		t.Errorf("source token was mutated by capper: Expiry=%v", shared.Expiry)
+	}
+}
+
+// TestOAuth2ConcurrentTokenNoExpiresInRace runs concurrent Token() calls against a server
+// that omits expires_in. It is meant to be run with -race.
+func TestOAuth2ConcurrentTokenNoExpiresInRace(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:gosec // test fixture, not a real credential
+			"access_token": testTokenNoExpiry,
+			"token_type":   "Bearer",
+		})
+	}))
+	defer server.Close()
+
+	provider, _ := newTestCCProvider(t, server.URL)
+
+	const goroutines = 50
+	for round := 0; round < 5; round++ {
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < goroutines; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				tok, err := provider.Token(context.Background())
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+					return
+				}
+				//nolint:gosec // test fixture, not a real credential
+				if tok != testTokenNoExpiry {
+					t.Errorf("unexpected token %q", tok)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+	}
+	// The capped token is cached for 5 minutes, so the server must not be hit every round.
+	if n := atomic.LoadInt32(&requests); n > goroutines {
+		t.Errorf("expected cached token to limit requests, got %d", n)
+	}
+}
+
+// TestOAuth2BackoffNoOverflow checks the backoff stays within [BackoffMinDuration, BackoffMaxDuration]
+// after many consecutive failures.
+func TestOAuth2BackoffNoOverflow(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error": "server_error"}`))
+	}))
+	defer server.Close()
+
+	cc, advance := newTestCCProvider(t, server.URL)
+
+	const failures = 100
+	for i := 1; i <= failures; i++ {
+		if _, err := cc.Token(context.Background()); err == nil {
+			t.Fatalf("attempt %d: expected error", i)
+		}
+		cc.mu.Lock()
+		d := cc.backoffDuration
+		cc.mu.Unlock()
+		if d < BackoffMinDuration || d > BackoffMaxDuration {
+			t.Fatalf("attempt %d: backoff %v outside [%v, %v]", i, d, BackoffMinDuration, BackoffMaxDuration)
+		}
+		advance(BackoffMaxDuration + time.Second)
+	}
+	// Every failure must have triggered a fetch (the clock was advanced past each backoff window)
+	if n := atomic.LoadInt32(&requests); n < failures {
+		t.Errorf("expected at least %d token requests, got %d", failures, n)
+	}
+}
+
+// TestOAuth2BackoffNoThunderingHerd checks that when the backoff window has expired, many
+// concurrent callers result in exactly one request to the token endpoint.
+func TestOAuth2BackoffNoThunderingHerd(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		// Keep the request in flight long enough for every goroutine to arrive
+		time.Sleep(300 * time.Millisecond)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error": "server_error"}`))
+	}))
+	defer server.Close()
+
+	cc, advance := newTestCCProvider(t, server.URL)
+
+	// First failure puts the provider into backoff
+	if _, err := cc.Token(context.Background()); err == nil {
+		t.Fatal("expected first call to fail")
+	}
+	// One failed fetch may take more than one HTTP request: the oauth2 library retries with
+	// the credentials in the body when auto-detecting the auth style fails. Measure it.
+	perFetch := atomic.LoadInt32(&requests)
+	if perFetch < 1 {
+		t.Fatalf("expected at least 1 request after first failure, got %d", perFetch)
+	}
+
+	// Let the backoff window expire
+	advance(BackoffMaxDuration + time.Second)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	var failed int32
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := cc.Token(context.Background()); err != nil {
+				atomic.AddInt32(&failed, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if extra := atomic.LoadInt32(&requests) - perFetch; extra != perFetch {
+		t.Errorf("expected exactly one fetch (%d request(s)) after backoff expiry, got %d request(s)", perFetch, extra)
+	}
+	if f := atomic.LoadInt32(&failed); f != goroutines {
+		t.Errorf("expected all %d callers to get an error, got %d", goroutines, f)
+	}
+}
+
+// TestOAuth2FirstFailureConcurrentCallers checks that a burst of concurrent callers hitting
+// a failing endpoint for the first time counts as a single failure (one backoff step).
+func TestOAuth2FirstFailureConcurrentCallers(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error": "server_error"}`))
+	}))
+	defer server.Close()
+
+	cc, _ := newTestCCProvider(t, server.URL)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = cc.Token(context.Background())
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Failed fetch = 1 or 2 HTTP requests (oauth2 auth style auto-detection), never one per caller
+	if n := atomic.LoadInt32(&requests); n < 1 || n > 2 {
+		t.Errorf("expected a single fetch (1-2 requests), got %d requests", n)
+	}
+	cc.mu.Lock()
+	attempts, d := cc.backoffAttempts, cc.backoffDuration
+	cc.mu.Unlock()
+	if attempts != 1 {
+		t.Errorf("expected 1 failure to be recorded for one failed fetch, got %d", attempts)
+	}
+	if d != BackoffMinDuration {
+		t.Errorf("expected backoff %v after first failure, got %v", BackoffMinDuration, d)
+	}
+}
+
+// TestOAuth2RecoversAfterFailures checks that the provider recovers once the IdP comes back
+// and that concurrent callers all receive the token.
+func TestOAuth2RecoversAfterFailures(t *testing.T) {
+	const failUntil = 3
+	var requests int32
+	var healthy atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		if !healthy.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error": "server_error"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{ //nolint:gosec // test fixture, not a real credential
+			"access_token": "recovered-token",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer server.Close()
+
+	cc, advance := newTestCCProvider(t, server.URL)
+
+	for i := 1; i <= failUntil; i++ {
+		if _, err := cc.Token(context.Background()); err == nil {
+			t.Fatalf("attempt %d: expected error", i)
+		}
+		// Still in backoff: must fail fast without hitting the server
+		before := atomic.LoadInt32(&requests)
+		if _, err := cc.Token(context.Background()); err == nil {
+			t.Fatalf("attempt %d: expected backoff error", i)
+		}
+		if after := atomic.LoadInt32(&requests); after != before {
+			t.Fatalf("attempt %d: request made while in backoff", i)
+		}
+		advance(BackoffMaxDuration + time.Second)
+	}
+
+	healthy.Store(true)
+
+	// IdP is back: a burst of concurrent callers must all get the token
+	const goroutines = 50
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	var okCount int32
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			tok, err := cc.Token(context.Background())
+			if err == nil && tok == "recovered-token" {
+				atomic.AddInt32(&okCount, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// The caller that wins the fetch must succeed; afterwards everyone gets the cached token
+	if atomic.LoadInt32(&okCount) == 0 {
+		t.Fatal("no caller received the token after the IdP recovered")
+	}
+	for i := 0; i < 3; i++ {
+		tok, err := cc.Token(context.Background())
+		if err != nil || tok != "recovered-token" {
+			t.Fatalf("subsequent call %d: got (%q, %v), want recovered-token", i, tok, err)
+		}
+	}
+	cc.mu.Lock()
+	lastErr, attempts, fetching, d := cc.lastErr, cc.backoffAttempts, cc.fetching, cc.backoffDuration
+	cc.mu.Unlock()
+	if lastErr != nil || attempts != 0 || fetching || d != BackoffMinDuration {
+		t.Errorf("state not reset after recovery: lastErr=%v attempts=%d fetching=%v backoff=%v", lastErr, attempts, fetching, d)
 	}
 }

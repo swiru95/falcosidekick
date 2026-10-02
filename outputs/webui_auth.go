@@ -238,12 +238,41 @@ func (p *clientCredentialsProvider) Token(ctx context.Context) (string, error) {
 
 	p.mu.Unlock()
 
-	// Use singleflight to ensure only one goroutine fetches at a time
+	// Use singleflight to ensure only one goroutine fetches at a time.
+	// All success/failure bookkeeping is done inside this closure so it runs once per fetch.
 	tokenInterface, err, _ := p.group.Do("fetch", func() (interface{}, error) {
-		token, err := p.source.Token()
-		if err != nil {
-			return nil, err
+		token, fetchErr := p.source.Token()
+
+		p.mu.Lock()
+		defer p.mu.Unlock()
+
+		if fetchErr != nil {
+			// Record error and set backoff
+			p.lastErr = fetchErr
+			p.lastErrTime = p.now()
+			p.backoffAttempts++
+
+			// Exponential backoff: 1s * 2^(min(attempts-1, 6)), capped at 60s
+			// Capping the shift at 6 ensures we don't overflow: 2^6 = 64, then capped to 60
+			shift := p.backoffAttempts - 1
+			if shift > 6 {
+				shift = 6
+			}
+			p.backoffDuration = BackoffMinDuration * time.Duration(1<<uint(shift))
+			if p.backoffDuration > BackoffMaxDuration {
+				p.backoffDuration = BackoffMaxDuration
+			}
+			p.fetching = false
+
+			return nil, fmt.Errorf("oauth2: failed to get token (backoff %v): %w", p.backoffDuration, fetchErr)
 		}
+
+		// Success, reset backoff and attempts
+		p.lastErr = nil
+		p.backoffAttempts = 0
+		p.backoffDuration = BackoffMinDuration
+		p.fetching = false
+
 		return token.AccessToken, nil
 	})
 
@@ -252,35 +281,9 @@ func (p *clientCredentialsProvider) Token(ctx context.Context) (string, error) {
 		tokenStr = ""
 	}
 
-	p.mu.Lock()
 	if err != nil {
-		// Record error and set backoff
-		p.lastErr = err
-		p.lastErrTime = p.now()
-		p.backoffAttempts++
-
-		// Exponential backoff: 1s * 2^(min(attempts-1, 6)), capped at 60s
-		// Capping the shift at 6 ensures we don't overflow: 2^6 = 64, then capped to 60
-		shift := p.backoffAttempts - 1
-		if shift > 6 {
-			shift = 6
-		}
-		p.backoffDuration = BackoffMinDuration * time.Duration(1<<uint(shift))
-		if p.backoffDuration > BackoffMaxDuration {
-			p.backoffDuration = BackoffMaxDuration
-		}
-		p.fetching = false
-		p.mu.Unlock()
-
-		return "", fmt.Errorf("oauth2: failed to get token (backoff %v): %w", p.backoffDuration, err)
+		return "", err
 	}
-
-	// Success, reset backoff and attempts
-	p.lastErr = nil
-	p.backoffAttempts = 0
-	p.backoffDuration = BackoffMinDuration
-	p.fetching = false
-	p.mu.Unlock()
 
 	return tokenStr, nil
 }
