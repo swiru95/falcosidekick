@@ -15,6 +15,11 @@ import (
 	"github.com/falcosecurity/falcosidekick/types"
 )
 
+const (
+	testAudience = "test-audience"
+	testToken    = "test-token"
+)
+
 // TestClientCredentialsFlow tests OAuth2 client credentials grant flow
 func TestClientCredentialsFlow(t *testing.T) {
 	tokenCalls := 0
@@ -39,8 +44,8 @@ func TestClientCredentialsFlow(t *testing.T) {
 		}
 		// Verify audience
 		audience := r.FormValue("audience")
-		if audience != "test-audience" {
-			t.Errorf("Expected audience=test-audience, got %s", audience)
+		if audience != testAudience {
+			t.Errorf("Expected audience=%s, got %s", testAudience, audience)
 		}
 		// Return token
 		w.Header().Set("Content-Type", "application/json")
@@ -59,7 +64,7 @@ func TestClientCredentialsFlow(t *testing.T) {
 			ClientID:     "test-client",
 			ClientSecret: "test-secret",
 			Scopes:       "api read",
-			Audience:     "test-audience",
+			Audience:     testAudience,
 		},
 	}
 
@@ -100,7 +105,7 @@ func TestFileTokenProvider(t *testing.T) {
 
 	// Write initial token
 	initialToken := "initial-token-123"
-	if err := os.WriteFile(tokenFile, []byte(initialToken+"\n"), 0o600); err != nil { //nolint:G306
+	if err := os.WriteFile(tokenFile, []byte(initialToken+"\n"), 0o600); err != nil {
 		t.Fatalf("Failed to write token file: %v", err)
 	}
 
@@ -141,7 +146,7 @@ func TestFileTokenProviderEmpty(t *testing.T) {
 	tokenFile := filepath.Join(tmpDir, "token")
 
 	// Create empty file
-	if err := os.WriteFile(tokenFile, []byte(""), 0o600); err != nil { //nolint:G306
+	if err := os.WriteFile(tokenFile, []byte(""), 0o600); err != nil {
 		t.Fatalf("Failed to write token file: %v", err)
 	}
 
@@ -169,10 +174,10 @@ func TestFileTokenProviderMissing(t *testing.T) {
 
 // TestValidateWebUIAuthConflict tests error when both OAuth2 and TokenFile are configured
 func TestValidateWebUIAuthConflict(t *testing.T) {
-	config := types.WebUIOutputConfig{ //nolint:G101
-		OAuth2: types.WebUIOAuth2Config{ //nolint:G101
+	config := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{ //nolint:gosec // test fixture, not a real credential
 			TokenURL: "https://example.com/token",
-			ClientID: "test",
+			ClientID: "test-config",
 		},
 		TokenFile: "/some/file",
 	}
@@ -185,8 +190,8 @@ func TestValidateWebUIAuthConflict(t *testing.T) {
 
 // TestValidateWebUIAuthMissingClientID tests error when ClientID is missing
 func TestValidateWebUIAuthMissingClientID(t *testing.T) {
-	config := types.WebUIOutputConfig{ //nolint:G101
-		OAuth2: types.WebUIOAuth2Config{ //nolint:G101
+	config := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{ //nolint:gosec // test fixture, not a real credential
 			TokenURL: "https://example.com/token",
 		},
 	}
@@ -199,10 +204,10 @@ func TestValidateWebUIAuthMissingClientID(t *testing.T) {
 
 // TestValidateWebUIAuthMissingSecret tests error when neither ClientSecret nor ClientSecretFile is configured
 func TestValidateWebUIAuthMissingSecret(t *testing.T) {
-	config := types.WebUIOutputConfig{ //nolint:G101
-		OAuth2: types.WebUIOAuth2Config{ //nolint:G101
+	config := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{ //nolint:gosec // test fixture, not a real credential
 			TokenURL: "https://example.com/token",
-			ClientID: "test-client",
+			ClientID: "test-client-no-secret",
 		},
 	}
 
@@ -227,7 +232,7 @@ func TestValidateWebUIAuthSecretFile(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	secretFile := filepath.Join(tmpDir, "secret")
-	if err := os.WriteFile(secretFile, []byte("secret-from-file\n"), 0o600); err != nil { //nolint:G306
+	if err := os.WriteFile(secretFile, []byte("secret-from-file\n"), 0o600); err != nil {
 		t.Fatalf("Failed to write secret file: %v", err)
 	}
 
@@ -248,8 +253,8 @@ func TestValidateWebUIAuthSecretFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get token: %v", err)
 	}
-	if token != "test-token" {
-		t.Errorf("Expected test-token, got %s", token)
+	if token != testToken {
+		t.Errorf("Expected %s, got %s", testToken, token)
 	}
 }
 
@@ -376,7 +381,7 @@ func TestOAuth2CAFile(t *testing.T) {
 	// Create a test CA file (empty is acceptable - no certs to add)
 	tmpDir := t.TempDir()
 	caFile := filepath.Join(tmpDir, "ca.crt")
-	if err := os.WriteFile(caFile, []byte(""), 0o600); err != nil { //nolint:G306
+	if err := os.WriteFile(caFile, []byte(""), 0o600); err != nil {
 		t.Fatalf("Failed to write CA file: %v", err)
 	}
 
@@ -425,11 +430,11 @@ func TestOAuth2ResourceIndicator(t *testing.T) {
 		// Verify both audience and resource are sent
 		audience := r.FormValue("audience")
 		resource := r.FormValue("resource")
-		if audience != "test-audience" {
-			t.Errorf("Expected audience=test-audience, got %s", audience)
+		if audience != testAudience {
+			t.Errorf("Expected audience=%s, got %s", testAudience, audience)
 		}
-		if resource != "test-audience" {
-			t.Errorf("Expected resource=test-audience, got %s", resource)
+		if resource != testAudience {
+			t.Errorf("Expected resource=%s, got %s", testAudience, resource)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		response := map[string]interface{}{
@@ -446,7 +451,7 @@ func TestOAuth2ResourceIndicator(t *testing.T) {
 			TokenURL:          server.URL,
 			ClientID:          "test",
 			ClientSecret:      "secret",
-			Audience:          "test-audience",
+			Audience:          testAudience,
 			ResourceIndicator: true,
 		},
 	}
@@ -481,7 +486,7 @@ func TestNoAuthConfigured(t *testing.T) {
 // TestOAuth2TokenURLHTTPNonLoopback tests error when tokenurl is HTTP on non-loopback
 func TestOAuth2TokenURLHTTPNonLoopback(t *testing.T) {
 	config := types.WebUIOutputConfig{
-		OAuth2: types.WebUIOAuth2Config{
+		OAuth2: types.WebUIOAuth2Config{ //nolint:gosec // test fixture, not a real credential
 			TokenURL:     "http://example.com/token",
 			ClientID:     "test",
 			ClientSecret: "secret",
@@ -508,7 +513,7 @@ func TestOAuth2TokenURLHTTPLoopback(t *testing.T) {
 	defer server.Close()
 
 	config := types.WebUIOutputConfig{
-		OAuth2: types.WebUIOAuth2Config{
+		OAuth2: types.WebUIOAuth2Config{ //nolint:gosec // test fixture, not a real credential
 			TokenURL:     "http://127.0.0.1:8080/token",
 			ClientID:     "test",
 			ClientSecret: "secret",
@@ -649,7 +654,7 @@ func TestFileTokenProviderStatErrorCachedToken(t *testing.T) {
 
 	// Write initial token
 	initialToken := "cached-token-123"
-	if err := os.WriteFile(tokenFile, []byte(initialToken+"\n"), 0o600); err != nil { //nolint:G306
+	if err := os.WriteFile(tokenFile, []byte(initialToken+"\n"), 0o600); err != nil {
 		t.Fatalf("Failed to write token file: %v", err)
 	}
 
@@ -691,7 +696,7 @@ func TestOAuth2TokenTTLCapping(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Return token response WITHOUT expires_in (should be capped to 5 minutes)
-		response := map[string]interface{}{
+		response := map[string]interface{}{ //nolint:gosec // test fixture, not a real credential
 			"access_token": "token-no-expiry",
 			"token_type":   "Bearer",
 			// Intentionally omit expires_in
@@ -703,8 +708,8 @@ func TestOAuth2TokenTTLCapping(t *testing.T) {
 	config := types.WebUIOutputConfig{
 		OAuth2: types.WebUIOAuth2Config{
 			TokenURL:     server.URL,
-			ClientID:     "test",
-			ClientSecret: "secret", //nolint:G101
+			ClientID:     "test-ttl-cap",
+			ClientSecret: "testsecret-notcred",
 		},
 	}
 
@@ -718,6 +723,7 @@ func TestOAuth2TokenTTLCapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get token without expires_in: %v", err)
 	}
+	//nolint:gosec // test fixture, not a real credential
 	if token != "token-no-expiry" {
 		t.Errorf("Expected token-no-expiry, got %s", token)
 	}
@@ -727,6 +733,7 @@ func TestOAuth2TokenTTLCapping(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to get cached token: %v", err)
 	}
+	//nolint:gosec // test fixture, not a real credential
 	if token2 != "token-no-expiry" {
 		t.Errorf("Expected reused token, got %s", token2)
 	}
@@ -746,8 +753,8 @@ func TestOAuth2TokenEndpointBackoff(t *testing.T) {
 	config := types.WebUIOutputConfig{
 		OAuth2: types.WebUIOAuth2Config{
 			TokenURL:     server.URL,
-			ClientID:     "test",
-			ClientSecret: "secret", //nolint:G101
+			ClientID:     "test-backoff",
+			ClientSecret: "testsecret-notcred",
 		},
 	}
 
