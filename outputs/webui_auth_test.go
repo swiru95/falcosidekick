@@ -170,7 +170,7 @@ func TestFileTokenProviderMissing(t *testing.T) {
 // TestValidateWebUIAuthConflict tests error when both OAuth2 and TokenFile are configured
 func TestValidateWebUIAuthConflict(t *testing.T) {
 	config := types.WebUIOutputConfig{ //nolint:G101
-		OAuth2: types.WebUIOAuth2Config{
+		OAuth2: types.WebUIOAuth2Config{ //nolint:G101
 			TokenURL: "https://example.com/token",
 			ClientID: "test",
 		},
@@ -186,7 +186,7 @@ func TestValidateWebUIAuthConflict(t *testing.T) {
 // TestValidateWebUIAuthMissingClientID tests error when ClientID is missing
 func TestValidateWebUIAuthMissingClientID(t *testing.T) {
 	config := types.WebUIOutputConfig{ //nolint:G101
-		OAuth2: types.WebUIOAuth2Config{
+		OAuth2: types.WebUIOAuth2Config{ //nolint:G101
 			TokenURL: "https://example.com/token",
 		},
 	}
@@ -200,7 +200,7 @@ func TestValidateWebUIAuthMissingClientID(t *testing.T) {
 // TestValidateWebUIAuthMissingSecret tests error when neither ClientSecret nor ClientSecretFile is configured
 func TestValidateWebUIAuthMissingSecret(t *testing.T) {
 	config := types.WebUIOutputConfig{ //nolint:G101
-		OAuth2: types.WebUIOAuth2Config{
+		OAuth2: types.WebUIOAuth2Config{ //nolint:G101
 			TokenURL: "https://example.com/token",
 			ClientID: "test-client",
 		},
