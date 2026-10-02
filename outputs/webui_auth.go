@@ -23,6 +23,17 @@ import (
 	"github.com/falcosecurity/falcosidekick/types"
 )
 
+const (
+	// HostLocalhost is the loopback hostname
+	HostLocalhost = "localhost"
+	// MaxTokenTTL is the maximum TTL for tokens without expires_in (5 minutes)
+	MaxTokenTTL = 5 * time.Minute
+	// BackoffMinDuration is the minimum duration for exponential backoff
+	BackoffMinDuration = 1 * time.Second
+	// BackoffMaxDuration is the maximum duration for exponential backoff
+	BackoffMaxDuration = 60 * time.Second
+)
+
 // tokenProvider interface for getting tokens
 type tokenProvider interface {
 	Token(ctx context.Context) (string, error)
@@ -31,7 +42,7 @@ type tokenProvider interface {
 // isLoopbackHost checks if a hostname is a loopback address
 func isLoopbackHost(host string) bool {
 	// Check for localhost
-	if host == "localhost" {
+	if host == HostLocalhost {
 		return true
 	}
 
@@ -40,19 +51,49 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// clientCredentialsProvider handles OAuth2 client credentials flow
-type clientCredentialsProvider struct {
-	config *clientcredentials.Config
+// tokenTTLCapper wraps a TokenSource and caps token TTL if Expiry is zero (no expires_in)
+type tokenTTLCapper struct {
 	source oauth2.TokenSource
+	mu     sync.Mutex
 }
 
-// fileTokenProvider handles reading tokens from a file
+// Token returns the token, capping TTL to MaxTokenTTL if Expiry is zero
+func (t *tokenTTLCapper) Token() (*oauth2.Token, error) {
+	token, err := t.source.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	// If token has no expiry (expires_in was missing), cap it to MaxTokenTTL
+	if token.Expiry.IsZero() {
+		t.mu.Lock()
+		token.Expiry = time.Now().Add(MaxTokenTTL)
+		t.mu.Unlock()
+	}
+
+	return token, nil
+}
+
+// clientCredentialsProvider handles OAuth2 client credentials flow with backoff and TTL capping
+type clientCredentialsProvider struct {
+	config          *clientcredentials.Config
+	source          oauth2.TokenSource
+	mu              sync.Mutex
+	lastErr         error
+	lastErrTime     time.Time
+	backoffDuration time.Duration
+	backoffAttempts int
+}
+
+// fileTokenProvider handles reading tokens from a file with cached fallback on errors
 type fileTokenProvider struct {
-	filePath string
-	mu       sync.RWMutex
-	token    string
-	mtime    time.Time
-	lastStat time.Time
+	filePath      string
+	mu            sync.RWMutex
+	token         string
+	mtime         time.Time
+	lastStat      time.Time
+	lastErrWarn   time.Time
+	tokenReadOnce bool // tracks if token was ever successfully read
 }
 
 // newClientCredentialsProvider creates a new OAuth2 client credentials provider
@@ -151,20 +192,62 @@ func newClientCredentialsProvider(cfg types.WebUIOAuth2Config, outputType string
 	}
 
 	// Create token source (clientcredentials.Config.TokenSource already handles caching)
-	source := oauth2Config.TokenSource(context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient))
+	baseSource := oauth2Config.TokenSource(context.WithValue(context.Background(), oauth2.HTTPClient, tokenHTTPClient))
+
+	// Wrap with TTL capper to enforce max 5-minute TTL if expires_in is missing
+	cappedSource := &tokenTTLCapper{source: baseSource}
 
 	return &clientCredentialsProvider{
-		config: oauth2Config,
-		source: source,
+		config:          oauth2Config,
+		source:          cappedSource,
+		backoffDuration: BackoffMinDuration,
 	}, nil
 }
 
-// Token returns the current OAuth2 token
+// Token returns the current OAuth2 token with exponential backoff on errors
 func (p *clientCredentialsProvider) Token(ctx context.Context) (string, error) {
+	p.mu.Lock()
+
+	// Check if we're in backoff period
+	if p.lastErr != nil && time.Since(p.lastErrTime) < p.backoffDuration {
+		defer p.mu.Unlock()
+		// Still in backoff, return the cached error
+		return "", fmt.Errorf("oauth2: in backoff period, failed to get token: %w", p.lastErr)
+	}
+
+	// If we were in backoff and it expired, try again
+	if p.lastErr != nil {
+		p.lastErr = nil
+		p.backoffAttempts = 0
+	}
+
+	p.mu.Unlock()
+
 	token, err := p.source.Token()
 	if err != nil {
-		return "", fmt.Errorf("oauth2: failed to get token: %w", err)
+		p.mu.Lock()
+		// Record error and set backoff
+		p.lastErr = err
+		p.lastErrTime = time.Now()
+		p.backoffAttempts++
+
+		// Exponential backoff: 1s * 2^attempts, capped at 60s
+		p.backoffDuration = BackoffMinDuration * time.Duration(1<<uint(p.backoffAttempts-1))
+		if p.backoffDuration > BackoffMaxDuration {
+			p.backoffDuration = BackoffMaxDuration
+		}
+		p.mu.Unlock()
+
+		return "", fmt.Errorf("oauth2: failed to get token (backoff %v): %w", p.backoffDuration, err)
 	}
+
+	// Success, reset backoff
+	p.mu.Lock()
+	p.lastErr = nil
+	p.backoffAttempts = 0
+	p.backoffDuration = BackoffMinDuration
+	p.mu.Unlock()
+
 	return token.AccessToken, nil
 }
 
@@ -194,6 +277,9 @@ func (p *fileTokenProvider) refresh() error {
 	p.mu.RLock()
 	lastStat := p.lastStat
 	oldMTime := p.mtime
+	hasToken := p.token != ""
+	tokenReadOnce := p.tokenReadOnce
+	lastErrWarn := p.lastErrWarn
 	p.mu.RUnlock()
 
 	// Check 30s throttle only if we've already read the file
@@ -203,6 +289,20 @@ func (p *fileTokenProvider) refresh() error {
 
 	info, err := os.Stat(p.filePath)
 	if err != nil {
+		// If we have a cached token, log warning (rate-limited) and continue serving it
+		if hasToken {
+			if now.Sub(lastErrWarn) > 1*time.Minute {
+				utils.Log(utils.WarningLvl, "WebUI", fmt.Sprintf("tokenfile: failed to stat file (serving cached token): %v", err))
+				p.mu.Lock()
+				p.lastErrWarn = now
+				p.mu.Unlock()
+			}
+			p.mu.Lock()
+			p.lastStat = now
+			p.mu.Unlock()
+			return nil
+		}
+		// No cached token and stat failed, this is a hard error
 		return fmt.Errorf("tokenfile: failed to stat file: %w", err)
 	}
 
@@ -219,11 +319,42 @@ func (p *fileTokenProvider) refresh() error {
 	// Read new token
 	data, err := os.ReadFile(p.filePath)
 	if err != nil {
+		// If we have a cached token, log warning and continue serving it
+		if hasToken {
+			if now.Sub(lastErrWarn) > 1*time.Minute {
+				utils.Log(utils.WarningLvl, "WebUI", fmt.Sprintf("tokenfile: failed to read file (serving cached token): %v", err))
+				p.mu.Lock()
+				p.lastErrWarn = now
+				p.mu.Unlock()
+			}
+			p.mu.Lock()
+			p.lastStat = now
+			p.mu.Unlock()
+			return nil
+		}
+		// No cached token and read failed, this is a hard error
 		return fmt.Errorf("tokenfile: failed to read file: %w", err)
 	}
 
 	token := strings.TrimSpace(string(data))
 	if token == "" {
+		// Only error if we never successfully read a token before
+		if !tokenReadOnce {
+			return errors.New("tokenfile: file is empty")
+		}
+		// If we have cached token but new read is empty, keep serving cache
+		if hasToken {
+			if now.Sub(lastErrWarn) > 1*time.Minute {
+				utils.Log(utils.WarningLvl, "WebUI", "tokenfile: file is now empty (serving cached token)")
+				p.mu.Lock()
+				p.lastErrWarn = now
+				p.mu.Unlock()
+			}
+			p.mu.Lock()
+			p.lastStat = now
+			p.mu.Unlock()
+			return nil
+		}
 		return errors.New("tokenfile: file is empty")
 	}
 
@@ -231,6 +362,7 @@ func (p *fileTokenProvider) refresh() error {
 	p.token = token
 	p.mtime = newMTime
 	p.lastStat = now
+	p.tokenReadOnce = true
 	p.mu.Unlock()
 
 	return nil
@@ -238,18 +370,24 @@ func (p *fileTokenProvider) refresh() error {
 
 // Token returns the current token from file
 func (p *fileTokenProvider) Token(ctx context.Context) (string, error) {
-	if err := p.refresh(); err != nil {
+	err := p.refresh()
+
+	// Even if refresh fails, try to return cached token if available
+	p.mu.RLock()
+	cachedToken := p.token
+	p.mu.RUnlock()
+
+	if cachedToken != "" {
+		return cachedToken, nil
+	}
+
+	// No cached token available
+	if err != nil {
 		return "", err
 	}
 
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if p.token == "" {
-		return "", errors.New("tokenfile: no token available")
-	}
-
-	return p.token, nil
+	// No token and no error from refresh means file was empty on first read
+	return "", errors.New("tokenfile: no token available")
 }
 
 // ValidateWebUIAuth validates OAuth2 and TokenFile configuration

@@ -12,6 +12,11 @@ import (
 	"github.com/falcosecurity/falcosidekick/types"
 )
 
+const (
+	// OutputWebUI is the name of the WebUI output
+	OutputWebUI = "output:webui"
+)
+
 type WebUIPayload struct {
 	Event   types.FalcoPayload `json:"event"`
 	Outputs []string           `json:"outputs"`
@@ -35,7 +40,7 @@ func (c *Client) WebUIPost(falcopayload types.FalcoPayload) {
 		ctx := context.Background()
 		token, err := c.WebUITokenSource.Token(ctx)
 		if err != nil {
-			go c.CountMetric(Outputs, 1, []string{"output:webui", "status:error"})
+			go c.CountMetric(Outputs, 1, []string{OutputWebUI, "status:error"})
 			c.Stats.WebUI.Add(Error, 1)
 			c.PromStats.Outputs.With(map[string]string{"destination": "webui", "status": Error}).Inc()
 			c.OTLPMetrics.Outputs.With(attribute.String("destination", "webui"),
@@ -50,7 +55,7 @@ func (c *Client) WebUIPost(falcopayload types.FalcoPayload) {
 
 	err := c.Post(newWebUIPayload(falcopayload), opts...)
 	if err != nil {
-		go c.CountMetric(Outputs, 1, []string{"output:webui", "status:error"})
+		go c.CountMetric(Outputs, 1, []string{OutputWebUI, "status:error"})
 		c.Stats.WebUI.Add(Error, 1)
 		c.PromStats.Outputs.With(map[string]string{"destination": "webui", "status": Error}).Inc()
 		c.OTLPMetrics.Outputs.With(attribute.String("destination", "webui"),

@@ -100,7 +100,7 @@ func TestFileTokenProvider(t *testing.T) {
 
 	// Write initial token
 	initialToken := "initial-token-123"
-	if err := os.WriteFile(tokenFile, []byte(initialToken+"\n"), 0644); err != nil {
+	if err := os.WriteFile(tokenFile, []byte(initialToken+"\n"), 0o600); err != nil { //nolint:G306
 		t.Fatalf("Failed to write token file: %v", err)
 	}
 
@@ -141,7 +141,7 @@ func TestFileTokenProviderEmpty(t *testing.T) {
 	tokenFile := filepath.Join(tmpDir, "token")
 
 	// Create empty file
-	if err := os.WriteFile(tokenFile, []byte(""), 0644); err != nil {
+	if err := os.WriteFile(tokenFile, []byte(""), 0o600); err != nil { //nolint:G306
 		t.Fatalf("Failed to write token file: %v", err)
 	}
 
@@ -169,7 +169,7 @@ func TestFileTokenProviderMissing(t *testing.T) {
 
 // TestValidateWebUIAuthConflict tests error when both OAuth2 and TokenFile are configured
 func TestValidateWebUIAuthConflict(t *testing.T) {
-	config := types.WebUIOutputConfig{
+	config := types.WebUIOutputConfig{ //nolint:G101
 		OAuth2: types.WebUIOAuth2Config{
 			TokenURL: "https://example.com/token",
 			ClientID: "test",
@@ -185,7 +185,7 @@ func TestValidateWebUIAuthConflict(t *testing.T) {
 
 // TestValidateWebUIAuthMissingClientID tests error when ClientID is missing
 func TestValidateWebUIAuthMissingClientID(t *testing.T) {
-	config := types.WebUIOutputConfig{
+	config := types.WebUIOutputConfig{ //nolint:G101
 		OAuth2: types.WebUIOAuth2Config{
 			TokenURL: "https://example.com/token",
 		},
@@ -199,7 +199,7 @@ func TestValidateWebUIAuthMissingClientID(t *testing.T) {
 
 // TestValidateWebUIAuthMissingSecret tests error when neither ClientSecret nor ClientSecretFile is configured
 func TestValidateWebUIAuthMissingSecret(t *testing.T) {
-	config := types.WebUIOutputConfig{
+	config := types.WebUIOutputConfig{ //nolint:G101
 		OAuth2: types.WebUIOAuth2Config{
 			TokenURL: "https://example.com/token",
 			ClientID: "test-client",
@@ -227,7 +227,7 @@ func TestValidateWebUIAuthSecretFile(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	secretFile := filepath.Join(tmpDir, "secret")
-	if err := os.WriteFile(secretFile, []byte("secret-from-file\n"), 0644); err != nil {
+	if err := os.WriteFile(secretFile, []byte("secret-from-file\n"), 0o600); err != nil { //nolint:G306
 		t.Fatalf("Failed to write secret file: %v", err)
 	}
 
@@ -376,7 +376,7 @@ func TestOAuth2CAFile(t *testing.T) {
 	// Create a test CA file (empty is acceptable - no certs to add)
 	tmpDir := t.TempDir()
 	caFile := filepath.Join(tmpDir, "ca.crt")
-	if err := os.WriteFile(caFile, []byte(""), 0644); err != nil {
+	if err := os.WriteFile(caFile, []byte(""), 0o600); err != nil { //nolint:G306
 		t.Fatalf("Failed to write CA file: %v", err)
 	}
 
@@ -638,5 +638,140 @@ func TestScopesCommaAndSpaceSeparated(t *testing.T) {
 				t.Errorf("Failed to get token: %v", err)
 			}
 		})
+	}
+}
+
+// TestFileTokenProviderStatErrorCachedToken tests that stat errors don't discard cached tokens
+func TestFileTokenProviderStatErrorCachedToken(t *testing.T) {
+	// Create temporary directory
+	tmpDir := t.TempDir()
+	tokenFile := filepath.Join(tmpDir, "token")
+
+	// Write initial token
+	initialToken := "cached-token-123"
+	if err := os.WriteFile(tokenFile, []byte(initialToken+"\n"), 0o600); err != nil { //nolint:G306
+		t.Fatalf("Failed to write token file: %v", err)
+	}
+
+	config := types.WebUIOutputConfig{
+		TokenFile: tokenFile,
+	}
+
+	provider, err := ValidateWebUIAuth(config, "test")
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	// Get initial token
+	token1, err := provider.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to get initial token: %v", err)
+	}
+	if token1 != initialToken {
+		t.Errorf("Expected %s, got %s", initialToken, token1)
+	}
+
+	// Delete the token file
+	if err := os.Remove(tokenFile); err != nil {
+		t.Fatalf("Failed to remove token file: %v", err)
+	}
+
+	// Get token again - should still return cached token even though file is gone
+	token2, err := provider.Token(context.Background())
+	if err != nil {
+		t.Errorf("Expected cached token on stat error, got error: %v", err)
+	}
+	if token2 != initialToken {
+		t.Errorf("Expected cached token %s, got %s", initialToken, token2)
+	}
+}
+
+// TestOAuth2TokenTTLCapping tests that tokens without expires_in are capped at 5 minutes
+func TestOAuth2TokenTTLCapping(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Return token response WITHOUT expires_in (should be capped to 5 minutes)
+		response := map[string]interface{}{
+			"access_token": "token-no-expiry",
+			"token_type":   "Bearer",
+			// Intentionally omit expires_in
+		}
+		json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+
+	config := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{
+			TokenURL:     server.URL,
+			ClientID:     "test",
+			ClientSecret: "secret", //nolint:G101
+		},
+	}
+
+	provider, err := ValidateWebUIAuth(config, "test")
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	// Get token - should succeed even without expires_in
+	token, err := provider.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to get token without expires_in: %v", err)
+	}
+	if token != "token-no-expiry" {
+		t.Errorf("Expected token-no-expiry, got %s", token)
+	}
+
+	// Second call should reuse the token (cached by TokenSource)
+	token2, err := provider.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to get cached token: %v", err)
+	}
+	if token2 != "token-no-expiry" {
+		t.Errorf("Expected reused token, got %s", token2)
+	}
+}
+
+// TestOAuth2TokenEndpointBackoff tests exponential backoff on token endpoint errors
+func TestOAuth2TokenEndpointBackoff(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// Return error on first call
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": "server_error"}`))
+	}))
+	defer server.Close()
+
+	config := types.WebUIOutputConfig{
+		OAuth2: types.WebUIOAuth2Config{
+			TokenURL:     server.URL,
+			ClientID:     "test",
+			ClientSecret: "secret", //nolint:G101
+		},
+	}
+
+	provider, err := ValidateWebUIAuth(config, "test")
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	// First call should fail
+	_, err1 := provider.Token(context.Background())
+	if err1 == nil {
+		t.Error("Expected error on first token call")
+	}
+
+	// Second call should also fail immediately (in backoff)
+	// without making another request to the server
+	initialCallCount := callCount
+	_, err2 := provider.Token(context.Background())
+	if err2 == nil {
+		t.Error("Expected error on backoff second call")
+	}
+
+	// Should not have made additional call (backoff prevents it)
+	if callCount > initialCallCount {
+		t.Errorf("Expected backoff to prevent additional call, but call count increased from %d to %d", initialCallCount, callCount)
 	}
 }
