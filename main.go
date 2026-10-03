@@ -18,6 +18,7 @@ import (
 	"github.com/embano1/memlog"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/falcosecurity/falcosidekick/internal/pkg/certreload"
 	"github.com/falcosecurity/falcosidekick/internal/pkg/utils"
 	"github.com/falcosecurity/falcosidekick/outputs"
 	otlpmetrics "github.com/falcosecurity/falcosidekick/outputs/otlp_metrics"
@@ -987,7 +988,7 @@ func main() {
 
 	if config.TLSServer.Deploy {
 		// Create certificate reloader for hot-reload capability
-		reloader, err := newCertReloader(config.TLSServer.CertFile, config.TLSServer.KeyFile, 30*time.Second)
+		reloader, err := certreload.New(config.TLSServer.CertFile, config.TLSServer.KeyFile, 30*time.Second)
 		if err != nil {
 			utils.Log(utils.FatalLvl, "", fmt.Sprintf("failed to initialize certificate reloader: %v", err))
 		}
