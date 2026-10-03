@@ -153,9 +153,9 @@ func generateServerCertificate(caCertPEM, caKeyPEM []byte) (certPEM, keyPEM []by
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName: "localhost",
+			CommonName: HostLocalhost,
 		},
-		DNSNames:    []string{"localhost"},
+		DNSNames:    []string{HostLocalhost},
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		NotBefore:   time.Now(),
 		NotAfter:    time.Now().Add(24 * time.Hour),
