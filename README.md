@@ -393,7 +393,7 @@ All logs are sent to `stdout`.
 
 ## Mutual TLS ##
 
-Outputs with `mutualtls` enabled in their configuration require the *client.crt*, *client.key* and *ca.crt* filepaths to be configured in the **mutualtlsclient_certfile**, **mutualtlsclient_keyfile** and  **mutualtlsclient_cacertfile** global parameter.
+Outputs with `mutualtls` enabled in their configuration require the *client.crt*, *client.key* and *ca.crt* filepaths to be configured in the **mutualtlsclient_certfile**, **mutualtlsclient_keyfile** and  **mutualtlsclient_cacertfile** global parameter. Client certificates are automatically hot-reloaded every 30 seconds, enabling seamless rotation of short-lived certificates without restarts.
 
 ```bash
 docker run -d -p 2801:2801 -e MUTUALTLSCLIENT_CERTFILE=/etc/certs/client/client.crt -e MUTUALTLSCLIENT_KEYFILE=/etc/certs/client/client.key -e MUTUALTLSCLIENT_CACERTFILE=/etc/certs/client/ca.crt -e ALERTMANAGER_HOSTPORT=https://XXXX -e ALERTMANAGER_MUTUALTLS=true -e INFLUXDB_HOSTPORT=https://XXXX -e INFLUXDB_MUTUALTLS=true -e WEBHOOK_ADDRESS=XXXX -v /localpath/myclientcert.crt:/etc/certs/client/client.crt -v /localpath/myclientkey.key:/etc/certs/client/client.key -v /localpath/ca.crt:/etc/certs/client/ca.crt falcosecurity/falcosidekick
