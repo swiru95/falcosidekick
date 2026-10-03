@@ -41,6 +41,7 @@ import (
 	crdClient "sigs.k8s.io/wg-policy-prototypes/policy-report/pkg/generated/v1alpha2/clientset/versioned"
 
 	"github.com/falcosecurity/falcosidekick/internal/pkg/batcher"
+	"github.com/falcosecurity/falcosidekick/internal/pkg/certreload"
 	"github.com/falcosecurity/falcosidekick/internal/pkg/utils"
 	otlpmetrics "github.com/falcosecurity/falcosidekick/outputs/otlp_metrics"
 	"github.com/falcosecurity/falcosidekick/types"
@@ -508,7 +509,9 @@ func (c *Client) configureTransport() (*http.Transport, error) {
 		} else {
 			MutualTLSClientCaCertPath = c.Config.MutualTLSFilesPath + MutualTLSCacertFilename
 		}
-		cert, err := tls.LoadX509KeyPair(MutualTLSClientCertPath, MutualTLSClientKeyPath)
+
+		// Create certificate reloader for hot-reloading client certs
+		reloader, err := certreload.New(MutualTLSClientCertPath, MutualTLSClientKeyPath, 30*time.Second)
 		if err != nil {
 			return customTransport, err
 		}
@@ -519,7 +522,7 @@ func (c *Client) configureTransport() (*http.Transport, error) {
 			return customTransport, err
 		}
 		customTransport.TLSClientConfig.RootCAs.AppendCertsFromPEM(caCert)
-		customTransport.TLSClientConfig.Certificates = []tls.Certificate{cert}
+		customTransport.TLSClientConfig.GetClientCertificate = reloader.GetClientCertificate
 	} else {
 		// With MutualTLS enabled, the check cert flag is ignored
 		if !c.cfg.CheckCert {

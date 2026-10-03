@@ -662,6 +662,7 @@ func getConfig() *types.Configuration {
 	v.AutomaticEnv()
 
 	v.GetStringSlice("TLSServer.NoTLSPaths")
+	v.GetStringSlice("TLSServer.AllowedClientSANs")
 	v.GetStringSlice("Customtags")
 
 	v.GetStringMapString("Customfields")
@@ -682,8 +683,30 @@ func getConfig() *types.Configuration {
 		utils.Log(utils.ErrorLvl, "", fmt.Sprintf("Error unmarshalling config : %s", err))
 	}
 
+	// Trim spaces and drop empty entries for AllowedClientSANs from YAML/viper
+	{
+		var trimmed []string
+		for _, san := range c.TLSServer.AllowedClientSANs {
+			if t := strings.TrimSpace(san); t != "" {
+				trimmed = append(trimmed, t)
+			}
+		}
+		c.TLSServer.AllowedClientSANs = trimmed
+	}
+
 	if value, present := os.LookupEnv("TLSSERVER_NOTLSPATHS"); present {
 		c.TLSServer.NoTLSPaths = strings.Split(value, ",")
+	}
+
+	if value, present := os.LookupEnv("TLSSERVER_ALLOWEDCLIENTSANS"); present {
+		parts := strings.Split(value, ",")
+		var trimmed []string
+		for _, part := range parts {
+			if t := strings.TrimSpace(part); t != "" {
+				trimmed = append(trimmed, t)
+			}
+		}
+		c.TLSServer.AllowedClientSANs = trimmed
 	}
 
 	if value, present := os.LookupEnv("CUSTOMTAGS"); present {
