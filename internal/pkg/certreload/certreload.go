@@ -13,6 +13,11 @@ import (
 	"github.com/falcosecurity/falcosidekick/internal/pkg/utils"
 )
 
+// TestInterval is a package-level variable that can be set in tests to override the reload check interval.
+// When set to a non-zero value, it will be used instead of the interval passed to New().
+// This allows tests to control when certificate reloads are checked without sleeping.
+var TestInterval *time.Duration
+
 // Reloader holds certificate file paths and cached certificate for hot-reloading.
 type Reloader struct {
 	certFile        string
@@ -71,8 +76,14 @@ func (r *Reloader) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate,
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Use TestInterval if set (for testing), otherwise use the configured interval
+	checkInterval := r.interval
+	if TestInterval != nil {
+		checkInterval = *TestInterval
+	}
+
 	// Check if enough time has passed since last check
-	if time.Since(r.lastCheckTime) < r.interval {
+	if time.Since(r.lastCheckTime) < checkInterval {
 		return r.cachedCert, nil
 	}
 
@@ -132,8 +143,14 @@ func (r *Reloader) GetClientCertificate(cri *tls.CertificateRequestInfo) (*tls.C
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	// Use TestInterval if set (for testing), otherwise use the configured interval
+	checkInterval := r.interval
+	if TestInterval != nil {
+		checkInterval = *TestInterval
+	}
+
 	// Check if enough time has passed since last check
-	if time.Since(r.lastCheckTime) < r.interval {
+	if time.Since(r.lastCheckTime) < checkInterval {
 		return r.cachedCert, nil
 	}
 
@@ -185,4 +202,12 @@ func (r *Reloader) GetClientCertificate(cri *tls.CertificateRequestInfo) (*tls.C
 	utils.Log(utils.InfoLvl, "", "TLS client certificate reloaded")
 
 	return r.cachedCert, nil
+}
+
+// ResetCheckTime is a test hook to force the next check to reload certificates.
+// It should only be used in tests.
+func (r *Reloader) ResetCheckTime() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lastCheckTime = time.Now().Add(-time.Hour) // Set to 1 hour ago to force reload
 }
