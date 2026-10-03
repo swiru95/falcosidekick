@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"fmt"
 	"os"
@@ -14,14 +15,13 @@ import (
 
 // certReloader holds certificate file paths and cached certificate for hot-reloading.
 type certReloader struct {
-	certFile      string
-	keyFile       string
-	interval      time.Duration
-	cachedCert    *tls.Certificate
-	lastMtimeCert time.Time
-	lastMtimeKey  time.Time
-	lastCheckTime time.Time
-	mu            sync.Mutex
+	certFile        string
+	keyFile         string
+	interval        time.Duration
+	cachedCert      *tls.Certificate
+	lastContentHash [sha256.Size]byte
+	lastCheckTime   time.Time
+	mu              sync.Mutex
 }
 
 // newCertReloader creates a new certificate reloader and loads the initial certificate.
@@ -39,22 +39,34 @@ func newCertReloader(certFile, keyFile string, interval time.Duration) (*certRel
 		cachedCert: &cert,
 	}
 
-	// Set initial mtimes
-	certInfo, _ := os.Stat(certFile)
-	keyInfo, _ := os.Stat(keyFile)
-	if certInfo != nil {
-		r.lastMtimeCert = certInfo.ModTime()
-	}
-	if keyInfo != nil {
-		r.lastMtimeKey = keyInfo.ModTime()
+	// Compute initial content hash
+	if err := r.updateContentHash(); err != nil {
+		return nil, fmt.Errorf("failed to compute initial certificate hash: %w", err)
 	}
 	r.lastCheckTime = time.Now()
 
 	return r, nil
 }
 
+// updateContentHash reads both cert and key files and computes their SHA-256 hash.
+func (r *certReloader) updateContentHash() error {
+	certData, err := os.ReadFile(r.certFile)
+	if err != nil {
+		return err
+	}
+	keyData, err := os.ReadFile(r.keyFile)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	h.Write(certData)
+	h.Write(keyData)
+	copy(r.lastContentHash[:], h.Sum(nil))
+	return nil
+}
+
 // GetCertificate implements the tls.Config.GetCertificate callback.
-// It checks if certificate files have changed (at most once per interval) and reloads if needed.
+// It checks if certificate files have changed by content hash (at most once per interval) and reloads if needed.
 func (r *certReloader) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -66,47 +78,48 @@ func (r *certReloader) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certific
 
 	r.lastCheckTime = time.Now()
 
-	// Stat both files to check for changes
-	certInfo, certErr := os.Stat(r.certFile)
-	keyInfo, keyErr := os.Stat(r.keyFile)
-
-	// Determine if files have changed
-	certChanged := false
-	keyChanged := false
-
-	if certErr == nil && certInfo != nil {
-		if r.lastMtimeCert != certInfo.ModTime() {
-			certChanged = true
-		}
+	// Read both files and compute hash
+	certData, err := os.ReadFile(r.certFile)
+	if err != nil {
+		// Keep previous cert and log error
+		utils.Log(utils.ErrorLvl, "", fmt.Sprintf("failed to read certificate file: %v", err))
+		return r.cachedCert, nil
 	}
-
-	if keyErr == nil && keyInfo != nil {
-		if r.lastMtimeKey != keyInfo.ModTime() {
-			keyChanged = true
-		}
-	}
-
-	// If nothing changed, return cached cert
-	if !certChanged && !keyChanged {
+	keyData, err := os.ReadFile(r.keyFile)
+	if err != nil {
+		// Keep previous cert and log error
+		utils.Log(utils.ErrorLvl, "", fmt.Sprintf("failed to read key file: %v", err))
 		return r.cachedCert, nil
 	}
 
-	// Try to load new certificate
-	newCert, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
+	h := sha256.New()
+	h.Write(certData)
+	h.Write(keyData)
+	var currentHash [sha256.Size]byte
+	copy(currentHash[:], h.Sum(nil))
+
+	// If content hasn't changed, return cached cert
+	if currentHash == r.lastContentHash {
+		return r.cachedCert, nil
+	}
+
+	// Try to load new certificate from the bytes just read
+	newCert, err := tls.X509KeyPair(certData, keyData)
 	if err != nil {
 		// Keep previous cert and log error
 		utils.Log(utils.ErrorLvl, "", fmt.Sprintf("failed to reload TLS certificate: %v", err))
 		return r.cachedCert, nil
 	}
 
-	// Update cached cert and mtimes
+	// Chain-shrink guard: check if new chain has fewer certificates
+	if len(newCert.Certificate) < len(r.cachedCert.Certificate) {
+		utils.Log(utils.WarningLvl, "", fmt.Sprintf("TLS certificate reload skipped: new chain has %d certs, current has %d (partial write?)", len(newCert.Certificate), len(r.cachedCert.Certificate)))
+		return r.cachedCert, nil
+	}
+
+	// Update cached cert and content hash
 	r.cachedCert = &newCert
-	if certInfo != nil {
-		r.lastMtimeCert = certInfo.ModTime()
-	}
-	if keyInfo != nil {
-		r.lastMtimeKey = keyInfo.ModTime()
-	}
+	copy(r.lastContentHash[:], currentHash[:])
 
 	utils.Log(utils.InfoLvl, "", "TLS server certificate reloaded")
 

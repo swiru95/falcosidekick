@@ -409,11 +409,11 @@ In above example, the same client certificate will be used for both Alertmanager
 
 ## TLS Server
 
-When `tlsserver.deploy` is enabled, Falcosidekick listens for incoming connections via TLS. The server certificate is automatically hot-reloaded by checking for file changes every 30 seconds, making it suitable for short-lived certificates from cert-managers like cert-manager or step-ca autocert.
+When `tlsserver.deploy` is enabled, Falcosidekick listens for incoming connections via TLS. The server certificate is automatically hot-reloaded by computing a SHA-256 hash of the certificate and key bytes, making it suitable for short-lived certificates from cert-managers like cert-manager or step-ca autocert. The check interval is fixed at 30 seconds. To protect against partially written certificate bundles, a chain-shrink guard prevents loading a new certificate chain with fewer certificates than the currently served one.
 
 ### Mutual TLS with Client SAN Filtering
 
-When `tlsserver.mutualtls` is enabled, clients must present a valid certificate signed by the specified CA. Additionally, you can restrict accepted clients by their certificate Subject Alternative Name (SAN) using `tlsserver.allowedclientsans`.
+When `tlsserver.mutualtls` is enabled, clients must present a valid certificate signed by the specified CA. Additionally, you can restrict accepted clients by their certificate Subject Alternative Name (SAN) using `tlsserver.allowedclientsans`. Note: the allowlist proves identity only if the CA restricts who can obtain a name (e.g., via autocert's `restrictCertificatesToNamespace: true`); otherwise, combine it with NetworkPolicy.
 
 Configuration:
 
@@ -426,7 +426,6 @@ tlsserver:
   cacertfile: "/var/run/autocert.step.sm/root.crt"     # Client CA for verification
   allowedclientsans:                                     # Optional: filter clients by SAN
     - "falco.falco.svc.cluster.local"
-    - "falco-agent.falco.svc.cluster.local"
   notlsport: 2810                                       # HTTP port for health checks
   notlspaths:
     - "/ping"                                           # Non-TLS endpoint (e.g., for Kubernetes probes)
@@ -445,13 +444,13 @@ Environment variables:
 
 ### Certificate Hot-Reload
 
-The server certificate is automatically monitored and reloaded when file changes are detected. This enables:
+The server certificate is automatically monitored and reloaded by computing a SHA-256 hash of the certificate and key bytes. Change detection is content-based, not timestamp-based, so certificates are detected even if they are updated with an identical modification time. This enables:
 
 - **Automatic renewal**: Works seamlessly with cert-manager and step-ca autocert without requiring server restarts
 - **Short-lived certificates**: Suitable for 24-hour or shorter certificate lifetimes
 - **Zero-downtime updates**: Existing connections continue using the old certificate while new connections pick up the new one
 
-The check interval is fixed at 30 seconds. If a certificate reload fails (e.g., due to file corruption), the server continues serving the previous valid certificate and logs the error.
+The check interval is fixed at 30 seconds. A chain-shrink guard prevents loading a certificate chain with fewer certificates than the currently served one, protecting against reading a partially written bundle. If a certificate reload fails (e.g., due to file corruption or partial write), the server continues serving the previous valid certificate and logs the error.
 
 ## Metrics
 

@@ -1013,6 +1013,9 @@ func main() {
 				VerifyConnection: allowedSANVerifier(config.TLSServer.AllowedClientSANs),
 			}
 
+			// Log allowed SANs
+			utils.Log(utils.InfoLvl, "", fmt.Sprintf("tlsserver.allowedclientsans: %v", config.TLSServer.AllowedClientSANs))
+
 			// Warn if allow-list is empty
 			if len(config.TLSServer.AllowedClientSANs) == 0 {
 				utils.Log(utils.WarningLvl, "", "tlsserver.mutualtls is on but tlsserver.allowedclientsans is empty: any client certificate signed by the CA is accepted")

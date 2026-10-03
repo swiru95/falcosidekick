@@ -19,6 +19,11 @@ import (
 	"time"
 )
 
+const (
+	certBlockType       = "CERTIFICATE"
+	privateKeyBlockType = "PRIVATE KEY"
+)
+
 // generateTestCertificate generates a self-signed certificate for testing.
 func generateTestCertificate(commonName string, dnsNames []string) (certPEM, keyPEM []byte, err error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -49,14 +54,14 @@ func generateTestCertificate(commonName string, dnsNames []string) (certPEM, key
 		return nil, nil, err
 	}
 
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: certBlockType, Bytes: certDER})
 
 	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: privateKeyBlockType, Bytes: keyDER})
 
 	return certPEM, keyPEM, nil
 }
@@ -90,14 +95,14 @@ func generateRootCA() (certPEM, keyPEM []byte, err error) {
 		return nil, nil, err
 	}
 
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: certBlockType, Bytes: certDER})
 
 	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: privateKeyBlockType, Bytes: keyDER})
 
 	return certPEM, keyPEM, nil
 }
@@ -144,14 +149,14 @@ func generateSignedCertificate(commonName string, dnsNames []string, caCertPEM, 
 		return nil, nil, err
 	}
 
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: certBlockType, Bytes: certDER})
 
 	keyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: privateKeyBlockType, Bytes: keyDER})
 
 	return certPEM, keyPEM, nil
 }
@@ -168,10 +173,10 @@ func TestCertReloaderReloadsOnChange(t *testing.T) {
 		t.Fatalf("failed to generate certificate: %v", err)
 	}
 
-	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
+	if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
 		t.Fatalf("failed to write cert file: %v", err)
 	}
-	if err := os.WriteFile(keyFile, keyPEM, 0644); err != nil {
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 
@@ -196,10 +201,10 @@ func TestCertReloaderReloadsOnChange(t *testing.T) {
 		t.Fatalf("failed to generate new certificate: %v", err)
 	}
 
-	if err := os.WriteFile(certFile, newCertPEM, 0644); err != nil {
+	if err := os.WriteFile(certFile, newCertPEM, 0600); err != nil {
 		t.Fatalf("failed to write new cert file: %v", err)
 	}
-	if err := os.WriteFile(keyFile, newKeyPEM, 0644); err != nil {
+	if err := os.WriteFile(keyFile, newKeyPEM, 0600); err != nil {
 		t.Fatalf("failed to write new key file: %v", err)
 	}
 
@@ -232,10 +237,10 @@ func TestCertReloaderKeepsPreviousOnError(t *testing.T) {
 		t.Fatalf("failed to generate certificate: %v", err)
 	}
 
-	if err := os.WriteFile(certFile, certPEM, 0644); err != nil {
+	if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
 		t.Fatalf("failed to write cert file: %v", err)
 	}
-	if err := os.WriteFile(keyFile, keyPEM, 0644); err != nil {
+	if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
 		t.Fatalf("failed to write key file: %v", err)
 	}
 
@@ -255,7 +260,7 @@ func TestCertReloaderKeepsPreviousOnError(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Write corrupt data to cert file
-	if err := os.WriteFile(certFile, []byte("corrupt"), 0644); err != nil {
+	if err := os.WriteFile(certFile, []byte("corrupt"), 0600); err != nil {
 		t.Fatalf("failed to write corrupt cert file: %v", err)
 	}
 
@@ -378,7 +383,7 @@ func TestEndToEndWithAllowedSAN(t *testing.T) {
 	}
 
 	caCertFile := filepath.Join(tmpDir, "ca.pem")
-	if err := os.WriteFile(caCertFile, caCertPEM, 0644); err != nil {
+	if err := os.WriteFile(caCertFile, caCertPEM, 0600); err != nil {
 		t.Fatalf("failed to write CA cert: %v", err)
 	}
 
@@ -390,10 +395,10 @@ func TestEndToEndWithAllowedSAN(t *testing.T) {
 
 	serverCertFile := filepath.Join(tmpDir, "server.pem")
 	serverKeyFile := filepath.Join(tmpDir, "server.key")
-	if err := os.WriteFile(serverCertFile, serverCertPEM, 0644); err != nil {
+	if err := os.WriteFile(serverCertFile, serverCertPEM, 0600); err != nil {
 		t.Fatalf("failed to write server cert: %v", err)
 	}
-	if err := os.WriteFile(serverKeyFile, serverKeyPEM, 0644); err != nil {
+	if err := os.WriteFile(serverKeyFile, serverKeyPEM, 0600); err != nil {
 		t.Fatalf("failed to write server key: %v", err)
 	}
 
@@ -438,7 +443,11 @@ func TestEndToEndWithAllowedSAN(t *testing.T) {
 		io.WriteString(w, "OK")
 	})
 
-	go http.Serve(listener, mux)
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	go server.Serve(listener) //nolint:errcheck
 
 	// Create client with client cert
 	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)

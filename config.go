@@ -515,7 +515,6 @@ func getConfig() *types.Configuration {
 	v.SetDefault("TLSServer.MutualTLS", false)
 	v.SetDefault("TLSServer.CaCertFile", "/etc/certs/server/ca.crt")
 	v.SetDefault("TLSServer.NoTLSPort", 2810)
-	v.SetDefault("TLSServer.AllowedClientSANs", "")
 
 	// Set outputs defaults
 	for prefix, m := range outputDefaults {
@@ -682,6 +681,17 @@ func getConfig() *types.Configuration {
 
 	if err := v.Unmarshal(c); err != nil {
 		utils.Log(utils.ErrorLvl, "", fmt.Sprintf("Error unmarshalling config : %s", err))
+	}
+
+	// Trim spaces and drop empty entries for AllowedClientSANs from YAML/viper
+	{
+		var trimmed []string
+		for _, san := range c.TLSServer.AllowedClientSANs {
+			if t := strings.TrimSpace(san); t != "" {
+				trimmed = append(trimmed, t)
+			}
+		}
+		c.TLSServer.AllowedClientSANs = trimmed
 	}
 
 	if value, present := os.LookupEnv("TLSSERVER_NOTLSPATHS"); present {
