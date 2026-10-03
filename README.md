@@ -407,6 +407,52 @@ docker run -d -p 2801:2801 -e MUTUALTLSFILESPATH=/etc/certs -e ALERTMANAGER_HOST
 
 In above example, the same client certificate will be used for both Alertmanager & InfluxDB outputs which have mutualtls flag set to true.
 
+## TLS Server
+
+When `tlsserver.deploy` is enabled, Falcosidekick listens for incoming connections via TLS. The server certificate is automatically hot-reloaded by checking for file changes every 30 seconds, making it suitable for short-lived certificates from cert-managers like cert-manager or step-ca autocert.
+
+### Mutual TLS with Client SAN Filtering
+
+When `tlsserver.mutualtls` is enabled, clients must present a valid certificate signed by the specified CA. Additionally, you can restrict accepted clients by their certificate Subject Alternative Name (SAN) using `tlsserver.allowedclientsans`.
+
+Configuration:
+
+```yaml
+tlsserver:
+  deploy: true
+  mutualtls: true
+  certfile: "/var/run/autocert.step.sm/site.crt"       # Server certificate (hot-reloaded)
+  keyfile: "/var/run/autocert.step.sm/site.key"        # Server key
+  cacertfile: "/var/run/autocert.step.sm/root.crt"     # Client CA for verification
+  allowedclientsans:                                     # Optional: filter clients by SAN
+    - "falco.falco.svc.cluster.local"
+    - "falco-agent.falco.svc.cluster.local"
+  notlsport: 2810                                       # HTTP port for health checks
+  notlspaths:
+    - "/ping"                                           # Non-TLS endpoint (e.g., for Kubernetes probes)
+```
+
+Environment variables:
+
+- `TLSSERVER_DEPLOY`: Set to `true` to enable TLS server
+- `TLSSERVER_MUTUALTLS`: Set to `true` to require client certificates
+- `TLSSERVER_CERTFILE`: Path to server certificate file
+- `TLSSERVER_KEYFILE`: Path to server key file
+- `TLSSERVER_CACERTFILE`: Path to client CA certificate file
+- `TLSSERVER_ALLOWEDCLIENTSANS`: Comma-separated list of allowed client SANs (e.g., `falco.local,client2.local`)
+- `TLSSERVER_NOTLSPORT`: Port for non-TLS endpoints (default: 2810)
+- `TLSSERVER_NOTLSPATHS`: Comma-separated list of endpoints served over HTTP (e.g., `/ping,/metrics`)
+
+### Certificate Hot-Reload
+
+The server certificate is automatically monitored and reloaded when file changes are detected. This enables:
+
+- **Automatic renewal**: Works seamlessly with cert-manager and step-ca autocert without requiring server restarts
+- **Short-lived certificates**: Suitable for 24-hour or shorter certificate lifetimes
+- **Zero-downtime updates**: Existing connections continue using the old certificate while new connections pick up the new one
+
+The check interval is fixed at 30 seconds. If a certificate reload fails (e.g., due to file corruption), the server continues serving the previous valid certificate and logs the error.
+
 ## Metrics
 
 ### Golang ExpVar

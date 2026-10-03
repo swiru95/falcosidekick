@@ -165,13 +165,14 @@ type TLSClient struct {
 
 // TLSServer represents parameters for TLS Server
 type TLSServer struct {
-	Deploy     bool
-	CertFile   string
-	KeyFile    string
-	MutualTLS  bool
-	CaCertFile string
-	NoTLSPort  int
-	NoTLSPaths []string
+	Deploy            bool
+	CertFile          string
+	KeyFile           string
+	MutualTLS         bool
+	CaCertFile        string
+	NoTLSPort         int
+	NoTLSPaths        []string
+	AllowedClientSANs []string
 }
 
 type CommonConfig struct {

@@ -515,6 +515,7 @@ func getConfig() *types.Configuration {
 	v.SetDefault("TLSServer.MutualTLS", false)
 	v.SetDefault("TLSServer.CaCertFile", "/etc/certs/server/ca.crt")
 	v.SetDefault("TLSServer.NoTLSPort", 2810)
+	v.SetDefault("TLSServer.AllowedClientSANs", "")
 
 	// Set outputs defaults
 	for prefix, m := range outputDefaults {
@@ -662,6 +663,7 @@ func getConfig() *types.Configuration {
 	v.AutomaticEnv()
 
 	v.GetStringSlice("TLSServer.NoTLSPaths")
+	v.GetStringSlice("TLSServer.AllowedClientSANs")
 	v.GetStringSlice("Customtags")
 
 	v.GetStringMapString("Customfields")
@@ -684,6 +686,17 @@ func getConfig() *types.Configuration {
 
 	if value, present := os.LookupEnv("TLSSERVER_NOTLSPATHS"); present {
 		c.TLSServer.NoTLSPaths = strings.Split(value, ",")
+	}
+
+	if value, present := os.LookupEnv("TLSSERVER_ALLOWEDCLIENTSANS"); present {
+		parts := strings.Split(value, ",")
+		var trimmed []string
+		for _, part := range parts {
+			if t := strings.TrimSpace(part); t != "" {
+				trimmed = append(trimmed, t)
+			}
+		}
+		c.TLSServer.AllowedClientSANs = trimmed
 	}
 
 	if value, present := os.LookupEnv("CUSTOMTAGS"); present {

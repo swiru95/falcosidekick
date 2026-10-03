@@ -986,6 +986,12 @@ func main() {
 	}
 
 	if config.TLSServer.Deploy {
+		// Create certificate reloader for hot-reload capability
+		reloader, err := newCertReloader(config.TLSServer.CertFile, config.TLSServer.KeyFile, 30*time.Second)
+		if err != nil {
+			utils.Log(utils.FatalLvl, "", fmt.Sprintf("failed to initialize certificate reloader: %v", err))
+		}
+
 		if config.TLSServer.MutualTLS {
 			if config.Debug {
 				utils.Log(utils.DebugLvl, "", "running mTLS server")
@@ -993,21 +999,39 @@ func main() {
 
 			caCert, err := os.ReadFile(config.TLSServer.CaCertFile)
 			if err != nil {
-				utils.Log(utils.ErrorLvl, "", err.Error())
+				utils.Log(utils.FatalLvl, "", fmt.Sprintf("failed to read CA certificate: %v", err))
 			}
 			caCertPool := x509.NewCertPool()
 			caCertPool.AppendCertsFromPEM(caCert)
 
 			server.TLSConfig = &tls.Config{
-				ClientAuth: tls.RequireAndVerifyClientCert,
-				RootCAs:    caCertPool,
-				ClientCAs:  caCertPool,
-				MinVersion: tls.VersionTLS12,
+				ClientAuth:       tls.RequireAndVerifyClientCert,
+				RootCAs:          caCertPool,
+				ClientCAs:        caCertPool,
+				MinVersion:       tls.VersionTLS12,
+				GetCertificate:   reloader.GetCertificate,
+				VerifyConnection: allowedSANVerifier(config.TLSServer.AllowedClientSANs),
+			}
+
+			// Warn if allow-list is empty
+			if len(config.TLSServer.AllowedClientSANs) == 0 {
+				utils.Log(utils.WarningLvl, "", "tlsserver.mutualtls is on but tlsserver.allowedclientsans is empty: any client certificate signed by the CA is accepted")
+			}
+		} else {
+			// TLS mode without mTLS
+			if config.Debug {
+				utils.Log(utils.DebugLvl, "", "running TLS server")
+			}
+
+			server.TLSConfig = &tls.Config{
+				MinVersion:     tls.VersionTLS12,
+				GetCertificate: reloader.GetCertificate,
 			}
 		}
 
-		if config.Debug && !config.TLSServer.MutualTLS {
-			utils.Log(utils.DebugLvl, "", "running TLS server")
+		// Warn if AllowedClientSANs is set but mTLS is disabled
+		if len(config.TLSServer.AllowedClientSANs) > 0 && !config.TLSServer.MutualTLS {
+			utils.Log(utils.WarningLvl, "", "tlsserver.allowedclientsans is set but tlsserver.mutualtls is false: client certificate filtering has no effect")
 		}
 
 		if len(config.TLSServer.NoTLSPaths) == 0 {
@@ -1037,7 +1061,7 @@ func main() {
 			utils.Log(utils.FatalLvl, "", err.Error())
 		} else {
 			utils.Log(utils.InfoLvl, "", fmt.Sprintf("Falcosidekick is up and listening on %s:%d", config.ListenAddress, config.ListenPort))
-			if err := server.ListenAndServeTLS(config.TLSServer.CertFile, config.TLSServer.KeyFile); err != nil {
+			if err := server.ListenAndServeTLS("", ""); err != nil {
 				utils.Log(utils.FatalLvl, "", err.Error())
 			}
 		}
@@ -1058,7 +1082,7 @@ func main() {
 }
 
 func serveTLS(server *http.Server, errs chan<- error) {
-	errs <- server.ListenAndServeTLS(config.TLSServer.CertFile, config.TLSServer.KeyFile)
+	errs <- server.ListenAndServeTLS("", "")
 }
 
 func serveHTTP(server *http.Server, errs chan<- error) {
